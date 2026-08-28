@@ -1,11 +1,8 @@
 package migrate
 
 import (
-	"os"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
 // TestInstallTemplateToPhases_MovesToPhaseContainer: the reshaper MOVES a
@@ -132,28 +129,19 @@ func TestMigrationTable_InstallTemplateToPhases(t *testing.T) {
 	}
 }
 
-// TestEmbeddedVocabHasNoInstallTemplate is the read-only regression guard for the
-// in-tree install_template → phase.install.container migration: the repo's embedded
-// build vocabulary (charly/charly.yml) and build testdata (charly/testdata/build.yml)
-// — the two configs whose format:/builder: defs carried the removed field — must
-// already be migrated, so applying the reshaper in-memory is a NO-OP. The guard
-// never writes; a residual format/builder-level `install_template:` in either file
-// makes the reshaper report changed=true and fails the test. (The one-time
-// write-back driver this replaces ran the same reshaper over both files with
-// SetIndent(4) to produce the migrated configs.)
-func TestEmbeddedVocabHasNoInstallTemplate(t *testing.T) {
-	m := migration{Name: "t", Apply: "installTemplateToPhases"}
-	for _, rel := range []string{"../../charly/charly.yml", "../../charly/testdata/build.yml"} {
-		b, err := os.ReadFile(rel)
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		var doc yaml.Node
-		if err := yaml.Unmarshal(b, &doc); err != nil {
-			t.Fatalf("parse %s: %v", rel, err)
-		}
-		if _, changed := applyTransform(t, m, string(b)); changed {
-			t.Errorf("%s: a format/builder-level install_template: survived the migration — re-run the reshaper", rel)
-		}
-	}
-}
+// The in-tree vocabulary guard that used to live here — asserting charly's embedded
+// build vocabulary (charly/charly.yml, charly/testdata/build.yml) carries no residual
+// format/builder-level `install_template:` — has MOVED to the charly repo, where those
+// files actually live: charly/embed_defaults_install_template_test.go
+// (opencharly/charly#424).
+//
+// It read `../../charly/charly.yml`, a path that resolved only while this plugin was a
+// directory inside the charly repo. The de-submodule (c1b8b56, "remove the stray charly
+// submodule") left the path dangling, and nothing caught it because this repo's CI runs
+// `charly box validate` and never `go test`, so the guard had been dead — not failing,
+// simply never executed — ever since. A guard that cannot run is worse than no guard:
+// it reads as coverage.
+//
+// Keeping it here would need charly's source at a path this repo cannot guarantee, and
+// the only ways to do that are a network fetch inside a unit test or a skip when the file
+// is absent — and a skip is exactly how it died the first time.

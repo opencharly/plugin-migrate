@@ -81,4 +81,22 @@ migrations: [
 		// charly.yml section, never a per-host deploy-overlay field).
 		apply: "installTemplateToPhases"
 	},
+	{
+		version: "2026.240.1943"
+		name:    "reshape-graphics-gl"
+		// vm `libvirt.devices.graphics[].gl` changes SHAPE: the bare scalar (`gl: "yes"`,
+		// which could only ever reach spice's enable= attribute) becomes
+		// #LibvirtGraphicsGL{enable?, render_node?}, so that rendernode= — the attribute
+		// that points virtio-gpu at a specific host DRM node — is expressible at all
+		// (the GPU-configuration-surface cutover, spec-side version.cue).
+		//
+		// None of the four ops can do this: they rename keys and rewrite scalar VALUES,
+		// but cannot replace a scalar node with a MAPPING node — and the field sits inside
+		// a LIST element (graphics is a sequence), which under_kind scoping cannot address
+		// on its own. So a Go reshaper hook does it.
+		//
+		// A vm-kind entity's libvirt: block is a project charly.yml / vm.yml section, never
+		// a per-host deploy-overlay field — no touches_host.
+		apply: "reshapeGraphicsGL"
+	},
 ]

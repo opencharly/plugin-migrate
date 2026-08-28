@@ -112,6 +112,7 @@ var goHooks = map[string]func(*yaml.Node) bool{
 	"stripCandyLibvirtField":  stripCandyLibvirtField,  // candy-level libvirt: field removal (reshape_strip_candy_libvirt.go)
 	"stripDeployShellOverlay": stripDeployShellOverlay, // deploy-scope shell: overlay field removal (reshape_strip_deploy_shell.go)
 	"installTemplateToPhases": installTemplateToPhases, // format/builder install_template → phase.install.container move (reshape_install_template_to_phases.go)
+	"reshapeGraphicsGL":       reshapeGraphicsGL,       // vm libvirt.devices.graphics[].gl scalar → {enable} mapping (reshape_graphics_gl.go)
 }
 
 // migrationTable is the validated, ascending-ordered step list, loaded once at
