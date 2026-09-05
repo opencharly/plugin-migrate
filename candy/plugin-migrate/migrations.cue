@@ -1,4 +1,8 @@
-// migrations.cue — the declarative migration table: the DATA the `charly migrate`
+// version note: pinned at the CURRENT schema head (2026.248.1030) - the spec repo module
+		// TAG v0.2026248.1043 is the tag-on-merge CalVer, a DIFFERENT numbering domain from
+		// #SchemaVersion; the engine validates entries within [SchemaFloor, SchemaHead],
+		// and this entry targets the head (the record: field dies with this migration).
+		// migrations.cue — the declarative migration table: the DATA the `charly migrate`
 // engine interprets (embedded via //go:embed in engine.go). Each entry is validated
 // at process start against #Migration (schema/migration.cue, beside this file in the
 // plugin). Both the table DATA and the #Migration schema live HERE in
