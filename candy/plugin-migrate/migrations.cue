@@ -99,4 +99,21 @@ migrations: [
 		// a per-host deploy-overlay field — no touches_host.
 		apply: "reshapeGraphicsGL"
 	},
+	{
+		version: "2026.248.1030"
+		name:    "record-field-to-instrument"
+		// the deploy-level whole-run recording wrap `record:` field (the G5 bed-level
+		// recording) is HARVESTED into the instrument: entry of the new capture model
+		// (Cutover A): record_name becomes the instrument id, the #RecordWrap value
+		// fields pass through into the record verb input (method: session), and the
+		// runner owns the session lifecycle. A record: carrying method: is a plan-step
+		// verb sugar, never converted. Deploy-node field, never a per-host deploy-overlay
+		// key — no touches_host.
+		//
+		// version note: pinned at the CURRENT schema head (2026.248.1030). When the
+		// Cutover A schema cutover bumps #SchemaVersion, this step's version must be
+		// re-pinned to the new head in the same wave (the engine rejects entries outside
+		// [floor, head]).
+		apply: "recordFieldToInstrument"
+	},
 ]
