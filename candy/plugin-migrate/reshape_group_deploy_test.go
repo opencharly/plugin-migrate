@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -9,6 +10,10 @@ import (
 
 	"github.com/opencharly/sdk/kit"
 )
+
+// groupKeyRe matches a kind-discriminator `group:` line at mapping-key position
+// (the bed NAME may itself contain the substring "group").
+var groupKeyRe = regexp.MustCompile(`(?m)^\s*group:\s*$`)
 
 // reshape_group_deploy_test.go — the group: unroll: the two-member rewrite, the
 // scalars moved onto the primary, nested-group recursion, idempotence, and the
@@ -214,6 +219,49 @@ outer:
 	}
 	if hasKey(t, mapAt(t, out, "outer"), "inner") || hasKey(t, mapAt(t, out, "outer"), "leaf") {
 		t.Errorf("consumed nested member keys must die:\n%s", out)
+	}
+}
+
+// TestUnrollGroupInSubstrateMemberPromotesWholeValue: a member carrying an
+// IN-SUBSTRATE nested member (a vm member nesting a local deploy — the
+// check-group corpus shape) promotes ENTIRELY: the kind discriminator becomes
+// the entity's primary key and the nested member stays INSIDE the promoted
+// node (never dropped, never hoisted to the entity level).
+func TestUnrollGroupInSubstrateMemberPromotesWholeValue(t *testing.T) {
+	in := `version: 2026.249.2125
+check-group:
+    group:
+        disposable: true
+        lifecycle: dev
+    check-group-vm:
+        vm:
+            from: eval-vm
+        check-group-member:
+            local:
+                from: check-group-app
+`
+	out, changed := runUnroll(t, in)
+	if !changed {
+		t.Fatal("unroll reported no change")
+	}
+	// (the anchored match: the bed NAME itself contains "group" — only a
+	// kind-discriminator line at mapping-key position counts.)
+	if groupKeyRe.MatchString(out) || strings.Contains(out, "check-group-vm:") {
+		t.Errorf("the group key and the consumed member key must die:\n%s", out)
+	}
+	// The primary: the vm discriminator leads, carrying the member body + the
+	// group scalars; the nested member stays INSIDE the promoted node.
+	if v := mapAt(t, out, "check-group", "vm", "from"); v.Value != "eval-vm" {
+		t.Errorf("member body not promoted as the primary body:\n%s", out)
+	}
+	if !hasKey(t, mapAt(t, out, "check-group", "vm"), "disposable") {
+		t.Errorf("group scalars not moved onto the primary's kind body:\n%s", out)
+	}
+	if v := mapAt(t, out, "check-group", "check-group-member", "local", "from"); v.Value != "check-group-app" {
+		t.Errorf("in-substrate nested member must stay inside the promoted node:\n%s", out)
+	}
+	if hasKey(t, mapAt(t, out, "check-group"), "local") {
+		t.Errorf("the nested member must NOT hoist to the entity level:\n%s", out)
 	}
 }
 
