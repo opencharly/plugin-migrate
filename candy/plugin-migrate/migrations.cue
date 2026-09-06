@@ -114,10 +114,31 @@ migrations: [
 		// verb sugar, never converted. Deploy-node field, never a per-host deploy-overlay
 		// key — no touches_host.
 		//
-		// version note: pinned at the CURRENT schema head (2026.248.1030). When the
-		// Cutover A schema cutover bumps #SchemaVersion, this step's version must be
-		// re-pinned to the new head in the same wave (the engine rejects entries outside
-		// [floor, head]).
+		// version note: pinned at the schema head of its own cutover (2026.248.1030);
+		// the entry stays within [floor, head] under every later head bump.
 		apply: "recordFieldToInstrument"
+	},
+	{
+		version: "2026.249.2125"
+		name:    "unroll-group-deploy"
+		// the targetless deploy kind `group:` (C2-group) is REMOVED from #ResourceKind
+		// (spec #105, the Cutover C task 1 contract half) — the member-tree bed shape
+		// makes its dual representation forbidden at R10. This step rewrites the
+		// authored shape to the post-migrate spelling: the FIRST member becomes the
+		// deploy primary (the entity keeps its name and gains the member's substrate
+		// discriminator; the member key is consumed), the group scalars
+		// (disposable/lifecycle/description/iterate) MOVE onto that primary's kind
+		// body (the member's own keys win on collision), the REMAINING members stay
+		// deploy-level siblings, and nested groups rewrite recursively (post-order).
+		// A degenerate group (no promotable member) is left for the load-time gate to
+		// name. None of the four key-transform ops can replace two sibling keys with
+		// one promoted pair, so a Go reshaper hook does it. Deploy-node surface, never
+		// a per-host deploy-overlay field — no touches_host.
+		//
+		// version note: pinned at the group-cutover head (2026.249.2125, spec's
+		// #SchemaVersion bump that widens the migratable window for this row — the
+		// previous row already sat AT 2026.248.1030 and the table is strictly
+		// ascending within [floor, head]).
+		apply: "unrollGroupDeploy"
 	},
 ]
