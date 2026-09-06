@@ -114,6 +114,7 @@ var goHooks = map[string]func(*yaml.Node) bool{
 	"installTemplateToPhases": installTemplateToPhases, // format/builder install_template → phase.install.container move (reshape_install_template_to_phases.go)
 	"reshapeGraphicsGL":       reshapeGraphicsGL,       // vm libvirt.devices.graphics[].gl scalar → {enable} mapping (reshape_graphics_gl.go)
 	"recordFieldToInstrument": recordFieldToInstrument, // deploy record: field → instrument: entry harvest (reshape_record_field.go)
+	"unrollGroupDeploy":       unrollGroupDeploy,       // targetless deploy group: node → primary substrate + deploy-level siblings (reshape_group_deploy.go)
 }
 
 // migrationTable is the validated, ascending-ordered step list, loaded once at
