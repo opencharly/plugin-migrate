@@ -65,8 +65,9 @@ guarded:
 	}
 }
 
-// TestDeployCPUDoesNotTouchVariantCpus — #VmVariant.cpus has the same collision shape.
-func TestDeployCPUDoesNotTouchVariantCpus(t *testing.T) {
+// TestDeployCPURenamesVariantShape — #VmVariant was aligned in the same cutover
+// (cpus→cpu, memory→ram), so a variants: map value's shape fields ARE renamed.
+func TestDeployCPURenamesVariantShape(t *testing.T) {
 	in := `version: 2026.249.2125
 bed:
     vm:
@@ -76,9 +77,31 @@ bed:
                 cpus: 1
                 memory: 2G
 `
+	out := deployCPUMigrate(t, in)
+	if !strings.Contains(out, "cpu: 1") || !strings.Contains(out, "ram: 2G") {
+		t.Errorf("variants[].cpus/memory must be aligned to cpu/ram:\n%s", out)
+	}
+	if strings.Contains(out, "cpus:") || strings.Contains(out, "memory:") {
+		t.Errorf("stale variant spellings remain:\n%s", out)
+	}
+}
+
+// TestDeployCPUDoesNotTouchSecurityCpus is the exact collision guard (see the
+// schema-side mirror): security.cpus is a different field on a different def.
+func TestDeployCPUDoesNotTouchSecurityCpusNested(t *testing.T) {
+	in := `version: 2026.249.2125
+bed:
+    vm:
+        from: some-vm
+        variants:
+            small:
+                cpu: 1
+        security:
+            cpus: "2.5"
+`
 	out, _ := applyTransform(t, migration{Name: "t", Apply: "reshapeDeployCPU"}, in)
-	if !strings.Contains(out, "cpus: 1") {
-		t.Errorf("variants[].cpus is a different def and must survive:\n%s", out)
+	if !strings.Contains(out, `cpus: "2.5"`) {
+		t.Errorf("security.cpus must survive even alongside variants:\n%s", out)
 	}
 }
 
