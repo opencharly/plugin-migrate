@@ -65,29 +65,9 @@ guarded:
 	}
 }
 
-// TestDeployCPURenamesVariantShape — #VmVariant was aligned in the same cutover
-// (cpus→cpu, memory→ram), so a variants: map value's shape fields ARE renamed.
-func TestDeployCPURenamesVariantShape(t *testing.T) {
-	in := `version: 2026.249.2125
-bed:
-    vm:
-        from: some-vm
-        variants:
-            small:
-                cpus: 1
-                memory: 2G
-`
-	out := deployCPUMigrate(t, in)
-	if !strings.Contains(out, "cpu: 1") || !strings.Contains(out, "ram: 2G") {
-		t.Errorf("variants[].cpus/memory must be aligned to cpu/ram:\n%s", out)
-	}
-	if strings.Contains(out, "cpus:") || strings.Contains(out, "memory:") {
-		t.Errorf("stale variant spellings remain:\n%s", out)
-	}
-}
-
-// TestDeployCPUDoesNotTouchSecurityCpus is the exact collision guard (see the
-// schema-side mirror): security.cpus is a different field on a different def.
+// TestDeployCPUDoesNotTouchSecurityCpusNested is the deeper collision guard: a
+// security: block's own cpus survives even when the SAME body also carries a
+// sibling variants: map (the direct-child rule must never descend into either).
 func TestDeployCPUDoesNotTouchSecurityCpusNested(t *testing.T) {
 	in := `version: 2026.249.2125
 bed:
@@ -101,28 +81,48 @@ bed:
 `
 	out, _ := applyTransform(t, migration{Name: "t", Apply: "reshapeDeployCPU"}, in)
 	if !strings.Contains(out, `cpus: "2.5"`) {
-		t.Errorf("security.cpus must survive even alongside variants:\n%s", out)
+		t.Errorf("security.cpus must survive:\n%s", out)
+	}
+	// The direct-child rule must not descend into variants: either — its inner
+	// `cpu:` is left as authored (the variants surface is deleted).
+	if !strings.Contains(out, "cpu: 1") {
+		t.Errorf("the variants map must be left untouched:\n%s", out)
 	}
 }
 
-// TestDeployCPURenameAllSubstrates — every substrate kind body is covered, not just vm.
+// TestDeployCPURenameAllSubstrates — EVERY substrate kind body renames, not just vm:
+// pod, vm, local, kubernetes, android.
 func TestDeployCPURenameAllSubstrates(t *testing.T) {
 	in := `version: 2026.249.2125
 p:
     pod:
         from: base-pod
         cpus: 2
+v:
+    vm:
+        from: base-vm
+        cpus: 3
 l:
     local:
         from: base-local
-        cpus: 3
+        cpus: 4
+k:
+    kubernetes:
+        from: base-kube
+        cpus: 5
+a:
+    android:
+        from: base-android
+        cpus: 6
 `
 	out := deployCPUMigrate(t, in)
 	if strings.Contains(out, "cpus:") {
-		t.Errorf("all substrate kind bodies must rename:\n%s", out)
+		t.Errorf("every substrate kind body must rename:\n%s", out)
 	}
-	if !strings.Contains(out, "cpu: 2") || !strings.Contains(out, "cpu: 3") {
-		t.Errorf("both renamed values must be present:\n%s", out)
+	for _, want := range []string{"cpu: 2", "cpu: 3", "cpu: 4", "cpu: 5", "cpu: 6"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q after rename:\n%s", want, out)
+		}
 	}
 }
 

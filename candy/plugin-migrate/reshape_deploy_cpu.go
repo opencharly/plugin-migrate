@@ -3,9 +3,8 @@ package migrate
 import "gopkg.in/yaml.v3"
 
 // reshape_deploy_cpu.go — the per-deploy VM-shape override cutover: the deploy node's
-// CPU field is renamed from the singular outlier `cpus:` (plural) to `cpu:`, matching
-// every other VM-shape surface — `#Vm` (the template it overrides), the `--cpus` CLI
-// flag's spelling aside, and `#VmVariant`.
+// CPU field is renamed from the outlier plural `cpus:` to the singular `cpu:`, matching
+// every other VM-shape surface (`#Vm`, the template it overrides).
 //
 // WHY A RESHAPER HOOK, NOT THE DECLARATIVE `rename_key` OP. The obvious op —
 // `{op: rename_key, from: cpus, to: cpu, under_kind: vm}` — is UNSAFE. The op-walker's
@@ -13,22 +12,14 @@ import "gopkg.in/yaml.v3"
 // opTargetMappings: "every mapping that is (or is nested within) an entity value"), so
 // it would also match a LIVE `security:` block's own `cpus:` — a string CPU QUOTA
 // (`cpus: "2.5"`), a different field with a different type on a different def — and
-// rewrite it to the schema-invalid `security: {cpu: "2.5"}`. `#VmVariant.cpus` has the
-// same collision. A key rename keyed on a short word therefore cannot be scoped by
-// under_kind alone; it needs the exact PATH, which is this hook's job (the
-// reshapeGraphicsGL precedent).
+// rewrite it to the schema-invalid `security: {cpu: "2.5"}`. A key rename keyed on a
+// short word therefore cannot be scoped by under_kind alone; it needs the exact PATH,
+// which is this hook's job (the reshapeGraphicsGL precedent).
 //
-// SCOPE, EXACTLY: two positions, both VM-shape surfaces that were aligned to the singular
-// `cpu:` spelling in the same cutover:
-//
-//  1. a `cpus:` key that is a DIRECT child of a substrate kind body
-//     (`pod:`/`vm:`/`local:`/`kubernetes:`/`android:`) — the `#Deploy` override field;
-//  2. a `cpus:`/`memory:` key inside a `variants:` map value on that kind body — the
-//     `#VmVariant` fields (also aligned to `cpu:`/`ram:`).
-//
-// Direct-child (plus the one named `variants:` descent) is the whole point: a deeper
-// mapping such as `security: {cpus: …}` inside the same `vm:` body is a different field
-// with a different type and MUST be left alone. The `#DeployValue` shape puts the
+// SCOPE, EXACTLY: a `cpus:` key that is a DIRECT child of a substrate kind body
+// (`pod:`/`vm:`/`local:`/`kubernetes:`/`android:`) — the `#Deploy` override field. A
+// deeper mapping such as `security: {cpus: …}` inside the same `vm:` body is a different
+// field with a different type and MUST be left alone. The `#DeployValue` shape puts the
 // override fields directly on the kind body, which is what makes the direct-child rule
 // correct rather than merely conservative.
 //
@@ -44,6 +35,13 @@ func reshapeDeployCPU(doc *yaml.Node) bool {
 	}
 	return reshapeDeployCPURec(root)
 }
+
+// deploySubstrateWords are the substrate kind words that carry a `#Deploy` override
+// body. BOTH spellings are listed: `k8s` (the pre-rename form) and `kubernetes` — the
+// k8s-to-kubernetes migration (`2026.223.1018`) runs BEFORE this step
+// (`2026.261.1747`), so by the time this reshaper sees a config the kind is already
+// `kubernetes:`; `k8s` is kept so a direct call is idempotent either way.
+var deploySubstrateWords = setOfWords("pod", "vm", "k8s", "kubernetes", "local", "android")
 
 // reshapeDeployCPURec walks the whole document (a deploy node can appear at any nesting
 // depth — nested/peer members, per the recordFieldToInstrument precedent). For each
@@ -64,25 +62,9 @@ func reshapeDeployCPURec(n *yaml.Node) bool {
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			key, val := n.Content[i], n.Content[i+1]
-			if reshapeKindWords[key.Value] && val.Kind == yaml.MappingNode {
+			if deploySubstrateWords[key.Value] && val.Kind == yaml.MappingNode {
 				if renameDirectChildKey(val, "cpus", "cpu") {
 					changed = true
-				}
-				// #VmVariant: the variants: map's per-variant values carry the same
-				// shape fields, aligned in the same cutover (cpus→cpu, memory→ram).
-				if variants := reshapeMapValue(val, "variants"); variants != nil && variants.Kind == yaml.MappingNode {
-					for j := 0; j+1 < len(variants.Content); j += 2 {
-						vbody := variants.Content[j+1]
-						if vbody.Kind != yaml.MappingNode {
-							continue
-						}
-						if renameDirectChildKey(vbody, "cpus", "cpu") {
-							changed = true
-						}
-						if renameDirectChildKey(vbody, "memory", "ram") {
-							changed = true
-						}
-					}
 				}
 			}
 			if reshapeDeployCPURec(val) {
