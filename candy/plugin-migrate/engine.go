@@ -115,6 +115,7 @@ var goHooks = map[string]func(*yaml.Node) bool{
 	"reshapeGraphicsGL":       reshapeGraphicsGL,       // vm libvirt.devices.graphics[].gl scalar → {enable} mapping (reshape_graphics_gl.go)
 	"recordFieldToInstrument": recordFieldToInstrument, // deploy record: field → instrument: entry harvest (reshape_record_field.go)
 	"unrollGroupDeploy":       unrollGroupDeploy,       // targetless deploy group: node → primary substrate + deploy-level siblings (reshape_group_deploy.go)
+	"reshapeDeployCPU":        reshapeDeployCPU,        // deploy override cpus: → cpu: direct-child rename, path-scoped (reshape_deploy_cpu.go)
 }
 
 // migrationTable is the validated, ascending-ordered step list, loaded once at
