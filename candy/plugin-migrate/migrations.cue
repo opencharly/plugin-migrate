@@ -141,4 +141,24 @@ migrations: [
 		// ascending within [floor, head]).
 		apply: "unrollGroupDeploy"
 	},
+	{
+		version: "2026.261.1747"
+		name:    "deploy-cpu-spelling"
+		// the deploy node's per-deploy VM-shape override CPU field is renamed from the
+		// outlier `cpus:` (plural) to `cpu:`, matching #Vm (the template it overrides)
+		// and #VmVariant. The field was DEAD until this cutover's plugin-vm reader
+		// landed, so nothing authored has live meaning to preserve — the rename is for
+		// wire-surface correctness.
+		//
+		// WHY NOT the declarative `rename_key` op: scoped `under_kind: vm` it would also
+		// rewrite the LIVE `security:` block's own `cpus:` (a string CPU quota — a
+		// different field with a different type) nested inside the same vm body, because
+		// the op-walker's under_kind matches every mapping nested WITHIN the entity, not
+		// just the kind body's direct children. A short key word cannot be scoped by
+		// under_kind alone; the reshaper targets the exact direct-child position (the
+		// reshapeGraphicsGL precedent). Deploy-node field, authorable on the per-host
+		// deploy overlay too — touches_host.
+		touches_host: true
+		apply:        "reshapeDeployCPU"
+	},
 ]

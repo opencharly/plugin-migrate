@@ -336,20 +336,46 @@ bed:
 	}
 }
 
-// TestMigrationTable_UnrollGroupDeploy: the table carries the group-unroll as its
-// LAST (newest) step, pinned at the schema head, with the hook registered.
+// TestMigrationTable_UnrollGroupDeploy: the group-unroll remains IN the table with its
+// hook registered (it is no longer the newest entry — a later cutover may follow it).
 func TestMigrationTable_UnrollGroupDeploy(t *testing.T) {
-	m := migrationTable[len(migrationTable)-1]
-	if m.Name != "unroll-group-deploy" || m.Apply != "unrollGroupDeploy" || m.TouchesHost {
-		t.Errorf("unexpected last table entry: %+v", m)
+	var found *migration
+	for i := range migrationTable {
+		if migrationTable[i].Name == "unroll-group-deploy" {
+			found = &migrationTable[i]
+			break
+		}
 	}
-	if _, ok := goHooks[m.Apply]; !ok {
-		t.Errorf("hook %q not registered in goHooks", m.Apply)
+	if found == nil {
+		t.Fatal("unroll-group-deploy entry missing from the table")
+	}
+	if found.Apply != "unrollGroupDeploy" || found.TouchesHost {
+		t.Errorf("unexpected group-unroll entry: %+v", *found)
+	}
+	if _, ok := goHooks[found.Apply]; !ok {
+		t.Errorf("hook %q not registered in goHooks", found.Apply)
+	}
+}
+
+// TestMigrationTable_NewestPinnedAtHead: the table's LAST (newest) step is pinned exactly
+// at the schema head and its hook is registered. This is the invariant every cutover that
+// raises #SchemaVersion must satisfy: the newest migration row is the one whose cutover
+// widened the window to the current head. It supersedes the previous name-specific pin
+// now that a newer cutover (deploy-cpu-spelling) is the last row.
+func TestMigrationTable_NewestPinnedAtHead(t *testing.T) {
+	if len(migrationTable) == 0 {
+		t.Fatal("migration table is empty")
+	}
+	m := migrationTable[len(migrationTable)-1]
+	if m.Apply != "" {
+		if _, ok := goHooks[m.Apply]; !ok {
+			t.Errorf("newest step %q names unregistered hook %q", m.Name, m.Apply)
+		}
 	}
 	if !migrationTable[len(migrationTable)-2].Version.Less(m.Version) {
-		t.Errorf("unroll-group-deploy version %s must be strictly after the previous step", m.Version)
+		t.Errorf("newest step %q version %s must be strictly after the previous step", m.Name, m.Version)
 	}
 	if m.Version.String() != kit.LatestSchemaVersion().String() {
-		t.Errorf("unroll-group-deploy version %s must be pinned at the schema head", m.Version)
+		t.Errorf("newest step %q version %s must be pinned at the schema head %s", m.Name, m.Version, kit.LatestSchemaVersion())
 	}
 }
