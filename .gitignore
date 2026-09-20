@@ -1,0 +1,16 @@
+# Generated build artifacts (recreated by `charly box generate` / `charly box build`)
+.build/
+# Generated context-ignore files (podman reads .containerignore, docker .dockerignore)
+.containerignore
+.dockerignore
+# Eval run scratch
+.check/
+# VM / disk-image build outputs
+output/
+# Editor scratch
+*.swp
+*~
+
+# Migration rollback backups (charly migrate writes <file>.bak.<unix-ts>)
+*.bak
+*.bak.*
