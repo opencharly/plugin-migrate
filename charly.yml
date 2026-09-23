@@ -7,8 +7,61 @@
 #
 # Declaring discover: is the whole fix: the candy is scanned, the CUE schema gate
 # applies, and the STOCK `charly box validate` step starts working with no workflow
-# change. This file declares no entities of its own - it only tells charly where to look.
-version: 2026.232.0520
+# change. This file also declares the R10 witness bed (below).
+version: 2026.249.2125
 discover:
     - path: candy
       recursive: true
+
+check-migrate-app:
+    local:
+        description: |-
+            Minimal kind:local template for the check-migrate-local bed — composes the
+            command-only candy/plugin-migrate (no install content) so the bed exercises the
+            externalized `charly migrate` engine host-side.
+        candy:
+            - plugin-migrate
+check-migrate-local:
+    local:
+        from: check-migrate-app
+        host: local
+        disposable: true
+        lifecycle: dev
+        description: >-
+            Sole proof of the externalized config-schema MIGRATION ENGINE (candy/plugin-migrate, command:migrate — M15). A disposable kind:local deploy on host: local runs `charly migrate` host-side against mktemp fixtures: the host charly resolves command:migrate from the compiled-in registry and Invoke(OpRun) runs the engine in-proc, proving the engine relocation (at-HEAD no-op, --dry-run plumbing, below-floor refusal) end-to-end on a fresh rebuild; the declarative transform ops are covered by the plugin's engine_test.go units.
+        plan:
+            - check: charly migrate on an at-HEAD config is a no-op (exit 0, "nothing to migrate")
+              id: migrate-at-head-noop
+              exit_status: 0
+              stderr:
+                - contains: 'nothing to migrate'
+              context:
+                - runtime
+              # Targets THIS project's own charly.yml, which is always stamped at
+              # the schema HEAD — so the fixture cannot go stale when the schema
+              # bumps. (A hard-coded CalVer here DID go stale: the bed asserted a
+              # no-op on 2026.240.1943 while HEAD had moved to 2026.249.2125, so
+              # the run actually migrated instead of no-op'ing.)
+              command:
+                command: '${CHARLY_BIN} migrate --dir . --project-only'
+                in_container: false
+            - check: charly migrate --dry-run touches nothing (exit 0, prints the dry-run trailer)
+              id: migrate-dry-run-noop
+              exit_status: 0
+              stderr:
+                - contains: '(dry-run — no files were modified)'
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); printf "version: 2026.174.1100\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only --dry-run; rc=$?; rm -rf "$d"; exit $rc'
+                in_container: false
+            - check: a below-floor config is refused (exit 1, "predates the supported floor")
+              id: migrate-below-floor-refused
+              exit_status: 1
+              stderr:
+                - contains: 'predates the supported floor'
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); printf "version: 2026.001.0000\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
+                in_container: false
