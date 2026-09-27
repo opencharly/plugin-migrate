@@ -1,22 +1,18 @@
-// version note: pinned at the CURRENT schema head (2026.248.1030) - the spec repo module
-		// TAG v0.2026248.1043 is the tag-on-merge CalVer, a DIFFERENT numbering domain from
-		// #SchemaVersion; the engine validates entries within [SchemaFloor, SchemaHead],
-		// and this entry targets the head (the record: field dies with this migration).
-		// migrations.cue — the declarative migration table: the DATA the `charly migrate`
-// engine interprets (embedded via //go:embed in engine.go). Each entry is validated
-// at process start against #Migration (schema/migration.cue, beside this file in the
-// plugin). Both the table DATA and the #Migration schema live HERE in
-// candy/plugin-migrate, OUTSIDE the sdk schema, so neither enters the spec codegen /
-// vocab concatenation — engine data + a plugin-only validation schema, not ingress.
+// migrations.cue — the declarative migration table: the ORDERED DATA the
+// `charly migrate` engine interprets (embedded via //go:embed in engine.go).
+// Each entry is validated at process start against #Migration (schema/migration.cue,
+// beside this file in the plugin). Both the table DATA and the #Migration schema live
+// HERE in candy/plugin-migrate, OUTSIDE the sdk schema, so neither enters the spec
+// codegen / vocab concatenation — engine data + a plugin-only validation schema, not
+// ingress.
 //
-// At the current migration-baseline reset the table is EMPTY: no config below the
-// current schema HEAD is migratable (`charly migrate` stamps a current-format
-// config to HEAD and refuses anything below #SchemaFloor). Add a future migration
-// by appending ONE entry here and bumping #SchemaVersion in
-// sdk/schema/version.cue, then `task cue:gen`. Common ops need zero new Go:
+// There is no schema version and no version stamp: the table is a plain ordered list,
+// steps run in declaration order, and each step MUST be idempotent (a no-op when the
+// old shape is absent). Add a future migration by appending ONE entry here. Common
+// ops need zero new Go:
 //
 //   migrations: [
-//     {version: "2026.200.0800", name: "widget-rename",
+//     {name: "widget-rename",
 //      ops: [{op: "rename_key", from: "widget", to: "gadget", scope: "any"}]},
 //   ]
 //
@@ -24,21 +20,18 @@
 // one Go hook in goHooks. See /charly-build:migrate.
 migrations: [
 	{
-		version:      "2026.186.2323"
 		name:         "compact-node-form"
 		touches_host: true
 		apply:        "compactNodeForm"
 	},
 	{
-		version: "2026.202.0105"
-		name:    "strip-candy-libvirt-field"
+		name: "strip-candy-libvirt-field"
 		// candy-level libvirt: is a candy-body field, never authored on the
 		// per-host deploy overlay — no touches_host needed.
 		apply: "stripCandyLibvirtField"
 	},
 	{
-		version: "2026.204.1223"
-		name:    "strip-deploy-shell-overlay"
+		name: "strip-deploy-shell-overlay"
 		// the deploy-scope shell: overlay is authorable on a per-host
 		// charly.yml deploy entry too (as well as a project charly.yml) —
 		// touches_host so the per-host config is swept as well.
@@ -46,8 +39,7 @@ migrations: [
 		apply:        "stripDeployShellOverlay"
 	},
 	{
-		version: "2026.223.1018"
-		name:    "k8s-to-kubernetes"
+		name: "k8s-to-kubernetes"
 		// the deploy substrate kind `k8s:` → `kubernetes:` (full naming cleanup) and the
 		// inner deploy-knobs block `kubernetes:` → `deploy:` (the outer-node rename
 		// collides with the inner block, so the inner block becomes `deploy:`).
@@ -61,8 +53,7 @@ migrations: [
 		]
 	},
 	{
-		version: "2026.225.1508"
-		name:    "remove-candy-localpkg"
+		name: "remove-candy-localpkg"
 		// the candy-body `localpkg:` map (the OS-tracked package install) is REMOVED —
 		// replaced by the `packaging:` section (the nFPM cutover). A candy carrying the
 		// old field is a hard schema violation, so migrate deletes it. Candy-body field,
@@ -72,27 +63,25 @@ migrations: [
 		]
 	},
 	{
-		version: "2026.232.0520"
-		name:    "install-template-to-phases"
+		name: "install-template-to-phases"
 		// the legacy top-level `#Format.install_template` / `#Builder.install_template`
 		// fields (the (install, container) fallback) are REMOVED — their content
 		// migrates into `format.<fmt>.phase.install.container` / the builder equivalent,
 		// the phase: block's single source of truth (strict-cleanup cutover, Unit 3b).
-		// The nested move can't be expressed as rename_key/move_key ops (spec-side
-		// version.cue), so a Go reshaper hook moves it. A project charly.yml carrying
+		// The nested move can't be expressed as rename_key/move_key ops, so a Go
+		// reshaper hook moves it. A project charly.yml carrying
 		// the old field is a hard schema violation; the embedded build vocabulary is
 		// migrated in-tree — no touches_host (the format/builder vocab is a project
 		// charly.yml section, never a per-host deploy-overlay field).
 		apply: "installTemplateToPhases"
 	},
 	{
-		version: "2026.240.1943"
-		name:    "reshape-graphics-gl"
+		name: "reshape-graphics-gl"
 		// vm `libvirt.devices.graphics[].gl` changes SHAPE: the bare scalar (`gl: "yes"`,
 		// which could only ever reach spice's enable= attribute) becomes
 		// #LibvirtGraphicsGL{enable?, render_node?}, so that rendernode= — the attribute
 		// that points virtio-gpu at a specific host DRM node — is expressible at all
-		// (the GPU-configuration-surface cutover, spec-side version.cue).
+		// (the GPU-configuration-surface cutover).
 		//
 		// None of the four ops can do this: they rename keys and rewrite scalar VALUES,
 		// but cannot replace a scalar node with a MAPPING node — and the field sits inside
@@ -104,8 +93,7 @@ migrations: [
 		apply: "reshapeGraphicsGL"
 	},
 	{
-		version: "2026.248.1030"
-		name:    "record-field-to-instrument"
+		name: "record-field-to-instrument"
 		// the deploy-level whole-run recording wrap `record:` field (the G5 bed-level
 		// recording) is HARVESTED into the instrument: entry of the new capture model
 		// (Cutover A): record_name becomes the instrument id, the #RecordWrap value
@@ -113,14 +101,10 @@ migrations: [
 		// runner owns the session lifecycle. A record: carrying method: is a plan-step
 		// verb sugar, never converted. Deploy-node field, never a per-host deploy-overlay
 		// key — no touches_host.
-		//
-		// version note: pinned at the schema head of its own cutover (2026.248.1030);
-		// the entry stays within [floor, head] under every later head bump.
 		apply: "recordFieldToInstrument"
 	},
 	{
-		version: "2026.249.2125"
-		name:    "unroll-group-deploy"
+		name: "unroll-group-deploy"
 		// the targetless deploy kind `group:` (C2-group) is REMOVED from #ResourceKind
 		// (spec #105, the Cutover C task 1 contract half) — the member-tree bed shape
 		// makes its dual representation forbidden at R10. This step rewrites the
@@ -134,16 +118,10 @@ migrations: [
 		// name. None of the four key-transform ops can replace two sibling keys with
 		// one promoted pair, so a Go reshaper hook does it. Deploy-node surface, never
 		// a per-host deploy-overlay field — no touches_host.
-		//
-		// version note: pinned at the group-cutover head (2026.249.2125, spec's
-		// #SchemaVersion bump that widens the migratable window for this row — the
-		// previous row already sat AT 2026.248.1030 and the table is strictly
-		// ascending within [floor, head]).
 		apply: "unrollGroupDeploy"
 	},
 	{
-		version: "2026.261.1747"
-		name:    "deploy-cpu-spelling"
+		name: "deploy-cpu-spelling"
 		// the deploy node's per-deploy VM-shape override CPU field is renamed from the
 		// outlier `cpus:` (plural) to `cpu:`, matching #Vm (the template it overrides)
 		// and #VmVariant. The field was DEAD until this cutover's plugin-vm reader
@@ -160,5 +138,19 @@ migrations: [
 		// deploy overlay too — touches_host.
 		touches_host: true
 		apply:        "reshapeDeployCPU"
+	},
+	{
+		name: "rekey-legacy-vm-overlay"
+		// the per-host overlay's legacy `vm:<VmDomainIdentity>` deploy keys are a
+		// REMOVED convention, and `charly migrate` is the ONE and ONLY place that
+		// handles it. For each `^vm:` key: DROP it when a dotted sibling already
+		// carries the same domain identity under the new spelling (no information
+		// lost), else HARD-ERROR — the lossy key cannot be reversed back to a
+		// deploy identity. The step operates on the overlay's top-level `deploy:`
+		// mapping only; a project charly.yml carries no such mapping, so the
+		// generic project-file sweep is a no-op. touches_host so the per-host
+		// overlay is swept.
+		touches_host: true
+		apply:        "rekeyLegacyVMOverlay"
 	},
 ]
