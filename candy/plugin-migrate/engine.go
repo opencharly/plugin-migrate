@@ -425,6 +425,21 @@ func stripVersionStamp(ctx *MigrateContext, projectOnly bool) ([]string, error) 
 			changed = append(changed, name)
 		}
 	}
+	// The top-level `version:` stamp also rides every NON-root project document —
+	// candy/<name>/charly.yml, box/<name>/charly.yml, and imported project
+	// manifests (e.g. a distro repo's candy/…/charly.yml). Sweep every candidate
+	// document's TOP-LEVEL stamp too, not only the root charly.yml above.
+	// stripVersionField is idempotent (a file with no top-level stamp is
+	// untouched), so re-visiting the root is a no-op.
+	for _, p := range kit.OpUnifyCandidateFiles(ctx.Dir) {
+		did, err := stripVersionField(p, ctx.DryRun)
+		if err != nil {
+			return changed, err
+		}
+		if did {
+			changed = append(changed, p)
+		}
+	}
 	if !projectOnly && ctx.HostDeployPath != "" {
 		did, err := stripVersionField(ctx.HostDeployPath, ctx.DryRun)
 		if err != nil {
