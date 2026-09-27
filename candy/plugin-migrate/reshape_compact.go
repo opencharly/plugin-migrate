@@ -132,10 +132,12 @@ func setOfWords(ws ...string) map[string]bool {
 	return m
 }
 
-// compactNodeForm is the per-document transform (the goHooks contract). It
-// panics on a structural impossibility (duplicate data key / unclassifiable
-// child) — the engine treats a panic as the migration failing loudly, which is
-// the intended behavior for a config the reshape cannot faithfully convert.
+// compactNodeForm is the per-document transform (the goHooks contract). It is
+// idempotent: an entity already in the compact node-form grammar is a no-op (see
+// reshapeEntityIsCompact). It still panics on a structural impossibility
+// (duplicate data key / two genuine kind discriminators / unclassifiable child) —
+// the engine treats a panic as the migration failing loudly, which is the
+// intended behavior for a config the reshape cannot faithfully convert.
 func compactNodeForm(doc *yaml.Node) bool {
 	root := doc
 	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
@@ -205,6 +207,20 @@ func reshapeClassify(k string, v *yaml.Node) (string, error) {
 
 // reshapeCompactEntity folds one entity's children into its kind value in place.
 func reshapeCompactEntity(name string, val *yaml.Node) (bool, error) {
+	// ALREADY-COMPACT NO-OP. The engine runs every step unconditionally (there is
+	// no version gate), so this reshaper is replayed against documents that are
+	// already in the post-cutover compact grammar. An entity is compact when its
+	// kind discriminator body ALREADY carries the folded data/step content —
+	// `plan:` (the synthesized step list) or an inline data key. The
+	// pre-compaction grammar authored neither on the kind body: steps were
+	// entity-level children folded INTO `plan:`, and data lived as
+	// `<entity>-<key>: {<key>: …}` child wrappers. Re-folding a compact entity no
+	// longer applies, and worse, its member sub-entities (whose discriminators may
+	// be plugin-served kinds the frozen snapshot cannot know) would be
+	// re-classified as extra discriminators — the panic this guard prevents.
+	if reshapeEntityIsCompact(val) {
+		return false, nil
+	}
 	var discKey string
 	var discVal *yaml.Node
 	changed := false
@@ -459,6 +475,44 @@ func reshapeSetMapEntry(m *yaml.Node, key string, val *yaml.Node) {
 	}
 	m.Content = append(m.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, val)
+}
+
+// reshapeEntityIsCompact reports whether an entity mapping is already in the
+// current compact node-form grammar — i.e. the compaction has ALREADY folded its
+// data/step children into the kind discriminator body. It scans each child that
+// reshapeClassify calls a discriminator (a frozen kind word, or the fallback
+// unknown-kind mapping) and asks whether that kind body already carries folded
+// content (reshapeBodyIsCompact). The `group` kind is explicitly excluded: an
+// old targetless group node ALSO has no own data/step children (its members do),
+// but its body never carries `plan:`/data — it must NOT be mistaken for compact,
+// or the group-unroll step's members would never be folded.
+func reshapeEntityIsCompact(val *yaml.Node) bool {
+	for i := 0; i+1 < len(val.Content); i += 2 {
+		k, v := val.Content[i].Value, val.Content[i+1]
+		if k == "group" || v.Kind != yaml.MappingNode {
+			continue
+		}
+		if cls, err := reshapeClassify(k, v); err != nil || cls != "disc" {
+			continue
+		}
+		if reshapeBodyIsCompact(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// reshapeBodyIsCompact reports whether a kind discriminator body already holds
+// content the pre-compaction grammar never authored there: the synthesized
+// `plan:` step list, or a data field folded inline onto the kind body. Either is
+// the unambiguous signature of an entity that has already been compacted.
+func reshapeBodyIsCompact(body *yaml.Node) bool {
+	for i := 0; i+1 < len(body.Content); i += 2 {
+		if body.Content[i].Value == "plan" || reshapeDataKeys[body.Content[i].Value] {
+			return true
+		}
+	}
+	return false
 }
 
 // reshapeLooksLikeEntity reports whether a top-level mapping value is a charly

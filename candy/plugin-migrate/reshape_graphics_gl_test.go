@@ -109,13 +109,4 @@ func TestMigrationTable_ReshapeGraphicsGL(t *testing.T) {
 	if _, ok := goHooks[m.Apply]; !ok {
 		t.Errorf("hook %q not registered in goHooks", m.Apply)
 	}
-	if !migrationTable[5].Version.Less(m.Version) {
-		t.Errorf("reshape-graphics-gl version %s must be strictly after install-template-to-phases %s", m.Version, migrationTable[5].Version)
-	}
-	// The entry's version IS the schema HEAD it migrates TO: a step stamped anything else
-	// either never runs (older than HEAD leaves configs unmigrated at HEAD) or runs
-	// forever (newer than HEAD never satisfies the gate).
-	if got, want := m.Version.String(), "2026.240.1943"; got != want {
-		t.Errorf("reshape-graphics-gl version = %s, want the spec #SchemaVersion %s", got, want)
-	}
 }

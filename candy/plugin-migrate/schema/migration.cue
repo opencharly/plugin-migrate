@@ -6,21 +6,18 @@
 // contract. The engine embeds it (//go:embed schema/migration.cue) and unifies each
 // table entry against #Migration at process start (fail-fast, like registerCueKind).
 //
-// #Migration.version pins to #CanonCalVer, which STAYS the SDK's single source of
-// truth (sdk/schema/version.cue) — the engine concatenates THIS file with the SDK's
-// version.cue to compile #Migration standalone, without duplicating #CanonCalVer and
-// without pulling charly's full ingress schema. The defs are @go(-) (no gengotypes
-// type); the "exactly one of ops/apply" rule and the CalVer ordering are enforced in
-// Go (engine.go) — CUE's field-presence comparison is too fragile for that gate.
+// There is no schema version and no version stamp: the table is a plain ORDERED list
+// and #Migration carries no `version:`. The "exactly one of ops/apply" rule is
+// enforced in Go (engine.go) — CUE's field-presence comparison is too fragile for that
+// gate. The defs are @go(-) (no gengotypes type).
 
-// One migration step: a CalVer, a label, and EITHER a list of declarative ops OR
-// a named Go escape-hatch hook.
+// One migration step: a label, an optional touches_host flag, and EITHER a list of
+// declarative ops OR a named Go escape-hatch hook.
 #Migration: {
-	version:       #CanonCalVer // CalVer this step lands files at; engine runs version > file-version, ascending
-	name:          string       // short label for --dry-run / progress
+	name:          string        // short label for --dry-run / progress
 	touches_host?: bool | *false // also rewrite the per-host overlay?
 	ops?: [...#MigrationOp]      // declarative ops, applied in order (mutually exclusive with apply)
-	apply?: string              // named Go hook for a structural reshape (mutually exclusive with ops)
+	apply?: string               // named Go hook for a structural reshape (mutually exclusive with ops)
 } @go(-)
 
 // Where an op applies: only the top-level mapping (root) or recursively (any).

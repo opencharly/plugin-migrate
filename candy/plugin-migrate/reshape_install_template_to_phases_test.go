@@ -124,9 +124,6 @@ func TestMigrationTable_InstallTemplateToPhases(t *testing.T) {
 	if _, ok := goHooks[m.Apply]; !ok {
 		t.Errorf("hook %q not registered in goHooks", m.Apply)
 	}
-	if !migrationTable[4].Version.Less(m.Version) {
-		t.Errorf("install-template-to-phases version %s must be strictly after remove-candy-localpkg %s", m.Version, migrationTable[4].Version)
-	}
 }
 
 // The in-tree vocabulary guard that used to live here — asserting charly's embedded

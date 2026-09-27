@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/opencharly/sdk/kit"
 )
 
 // groupKeyRe matches a kind-discriminator `group:` line at mapping-key position
@@ -354,28 +352,5 @@ func TestMigrationTable_UnrollGroupDeploy(t *testing.T) {
 	}
 	if _, ok := goHooks[found.Apply]; !ok {
 		t.Errorf("hook %q not registered in goHooks", found.Apply)
-	}
-}
-
-// TestMigrationTable_NewestPinnedAtHead: the table's LAST (newest) step is pinned exactly
-// at the schema head and its hook is registered. This is the invariant every cutover that
-// raises #SchemaVersion must satisfy: the newest migration row is the one whose cutover
-// widened the window to the current head. It supersedes the previous name-specific pin
-// now that a newer cutover (deploy-cpu-spelling) is the last row.
-func TestMigrationTable_NewestPinnedAtHead(t *testing.T) {
-	if len(migrationTable) == 0 {
-		t.Fatal("migration table is empty")
-	}
-	m := migrationTable[len(migrationTable)-1]
-	if m.Apply != "" {
-		if _, ok := goHooks[m.Apply]; !ok {
-			t.Errorf("newest step %q names unregistered hook %q", m.Name, m.Apply)
-		}
-	}
-	if !migrationTable[len(migrationTable)-2].Version.Less(m.Version) {
-		t.Errorf("newest step %q version %s must be strictly after the previous step", m.Name, m.Version)
-	}
-	if m.Version.String() != kit.LatestSchemaVersion().String() {
-		t.Errorf("newest step %q version %s must be pinned at the schema head %s", m.Name, m.Version, kit.LatestSchemaVersion())
 	}
 }

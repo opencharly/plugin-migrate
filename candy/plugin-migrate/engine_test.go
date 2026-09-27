@@ -8,22 +8,7 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/opencharly/sdk/kit"
-	"github.com/opencharly/spec/spec"
 )
-
-// TestEngine_CueOwnedVersion proves the CUE-owned schema version linchpin: the
-// generated spec.SchemaVersion / spec.SchemaFloor consts (from schema/version.cue)
-// parse to the values kit exposes and the load-time gate uses.
-func TestEngine_CueOwnedVersion(t *testing.T) {
-	if spec.SchemaVersion != kit.LatestSchemaVersion().String() {
-		t.Fatalf("spec.SchemaVersion %q != kit.LatestSchemaVersion() %q", spec.SchemaVersion, kit.LatestSchemaVersion())
-	}
-	if spec.SchemaFloor != kit.SchemaFloor().String() {
-		t.Fatalf("spec.SchemaFloor %q != kit.SchemaFloor() %q", spec.SchemaFloor, kit.SchemaFloor())
-	}
-}
 
 // TestMigrationTable_CompactNodeForm: the table carries the schema-compaction
 // migration — an apply: goHook entry that touches host state — as its FIRST
@@ -45,8 +30,8 @@ func TestMigrationTable_CompactNodeForm(t *testing.T) {
 // `libvirt:` field removal as a project-only (non-touches_host) apply: goHook
 // entry, strictly after compact-node-form.
 func TestMigrationTable_StripCandyLibvirtField(t *testing.T) {
-	if len(migrationTable) != 10 {
-		t.Fatalf("migration table should carry exactly 10 entries, got %d", len(migrationTable))
+	if len(migrationTable) != 11 {
+		t.Fatalf("migration table should carry exactly 11 entries, got %d", len(migrationTable))
 	}
 	m := migrationTable[1]
 	if m.Name != "strip-candy-libvirt-field" || m.Apply != "stripCandyLibvirtField" || m.TouchesHost {
@@ -54,9 +39,6 @@ func TestMigrationTable_StripCandyLibvirtField(t *testing.T) {
 	}
 	if _, ok := goHooks[m.Apply]; !ok {
 		t.Errorf("hook %q not registered in goHooks", m.Apply)
-	}
-	if !migrationTable[0].Version.Less(m.Version) {
-		t.Errorf("strip-candy-libvirt-field version %s must be strictly after compact-node-form %s", m.Version, migrationTable[0].Version)
 	}
 }
 
@@ -71,9 +53,6 @@ func TestMigrationTable_StripDeployShellOverlay(t *testing.T) {
 	}
 	if _, ok := goHooks[m.Apply]; !ok {
 		t.Errorf("hook %q not registered in goHooks", m.Apply)
-	}
-	if !migrationTable[1].Version.Less(m.Version) {
-		t.Errorf("strip-deploy-shell-overlay version %s must be strictly after strip-candy-libvirt-field %s", m.Version, migrationTable[1].Version)
 	}
 }
 
@@ -93,9 +72,6 @@ func TestMigrationTable_K8sToKubernetes(t *testing.T) {
 	}
 	if op2.Op != "rename_key" || op2.From != "kubernetes" || op2.To != "deploy" || op2.UnderKind != "kubernetes" {
 		t.Errorf("op2 should rename kubernetes→deploy under_kind kubernetes: %+v", op2)
-	}
-	if !migrationTable[2].Version.Less(m.Version) {
-		t.Errorf("k8s-to-kubernetes version %s must be strictly after strip-deploy-shell-overlay %s", m.Version, migrationTable[2].Version)
 	}
 }
 
@@ -220,19 +196,21 @@ func TestStripDeployShellOverlay_RemovesSequenceValuedOnly(t *testing.T) {
 	}
 }
 
-func writeRoot(t *testing.T, version string) string {
+// writeRoot writes a minimal, already-current (version-free) project charly.yml.
+func writeRoot(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	body := "version: " + version + "\ndiscover: []\n"
+	body := "discover: []\n"
 	if err := os.WriteFile(filepath.Join(dir, "charly.yml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
-// TestRunMigrations_AtHeadNoOp: a config already at HEAD is a no-op, unchanged.
-func TestRunMigrations_AtHeadNoOp(t *testing.T) {
-	dir := writeRoot(t, spec.SchemaVersion)
+// TestRunMigrations_AlreadyCurrentNoOp: a document with no old shapes and no
+// version keys is untouched — nothing to migrate.
+func TestRunMigrations_AlreadyCurrentNoOp(t *testing.T) {
+	dir := writeRoot(t)
 	before, _ := os.ReadFile(filepath.Join(dir, "charly.yml"))
 	var out bytes.Buffer
 	changed, err := runMigrations(&MigrateContext{Dir: dir, Out: &out}, false)
@@ -240,32 +218,131 @@ func TestRunMigrations_AtHeadNoOp(t *testing.T) {
 		t.Fatalf("runMigrations: %v", err)
 	}
 	if changed {
-		t.Error("at-HEAD config reported changed=true")
+		t.Error("already-current config reported changed=true")
 	}
 	if !strings.Contains(out.String(), "nothing to migrate") {
 		t.Errorf("want 'nothing to migrate', got %q", out.String())
 	}
 	after, _ := os.ReadFile(filepath.Join(dir, "charly.yml"))
 	if !bytes.Equal(before, after) {
-		t.Error("at-HEAD config was modified")
+		t.Error("already-current config was modified")
 	}
 }
 
-// TestRunMigrations_BelowFloorRefused: a below-floor config is refused with an
-// actionable "predates the supported floor" error and left untouched.
-func TestRunMigrations_BelowFloorRefused(t *testing.T) {
-	dir := writeRoot(t, "2026.001.0000")
-	before, _ := os.ReadFile(filepath.Join(dir, "charly.yml"))
-	_, err := runMigrations(&MigrateContext{Dir: dir, Out: &bytes.Buffer{}}, false)
-	if err == nil {
-		t.Fatal("below-floor config accepted; want error")
+// TestRunMigrations_StripsVersionStamp: a document carrying a top-level `version:`
+// and a per-entity (candy) `version:` has BOTH stripped by the universal
+// strip-version-stamp step, while unrelated fields survive.
+func TestRunMigrations_StripsVersionStamp(t *testing.T) {
+	dir := t.TempDir()
+	body := "" +
+		"version: 2026.248.1030\n" +
+		"discover: []\n" +
+		"mycandy:\n" +
+		"  candy:\n" +
+		"    version: 2026.186.0100\n" +
+		"    description: d\n"
+	root := filepath.Join(dir, "charly.yml")
+	if err := os.WriteFile(root, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "predates the supported floor") {
-		t.Errorf("want 'predates the supported floor', got %v", err)
+	var out bytes.Buffer
+	changed, err := runMigrations(&MigrateContext{Dir: dir, Out: &out}, false)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
 	}
-	after, _ := os.ReadFile(filepath.Join(dir, "charly.yml"))
-	if !bytes.Equal(before, after) {
-		t.Error("below-floor config was modified")
+	if !changed {
+		t.Fatalf("expected the version stamps to be stripped; output: %q", out.String())
+	}
+	after, _ := os.ReadFile(root)
+	if strings.Contains(string(after), "version:") {
+		t.Errorf("a version: key survived:\n%s", after)
+	}
+	if !strings.Contains(string(after), "description: d") || !strings.Contains(string(after), "discover: []") {
+		t.Errorf("unrelated fields damaged:\n%s", after)
+	}
+	if !strings.Contains(out.String(), "applied strip-version-stamp") {
+		t.Errorf("want 'applied strip-version-stamp', got %q", out.String())
+	}
+}
+
+// TestRunMigrations_Idempotent: running the engine twice is a no-op — the second
+// run changes nothing and reports "nothing to migrate". This is the proof that
+// `charly migrate` is idempotent.
+func TestRunMigrations_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	body := "" +
+		"version: 2026.186.2323\n" +
+		"mycandy:\n" +
+		"  candy:\n" +
+		"    version: 2026.186.0100\n" +
+		"    description: d\n"
+	root := filepath.Join(dir, "charly.yml")
+	if err := os.WriteFile(root, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := runMigrations(&MigrateContext{Dir: dir, Out: &out}, false); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	afterFirst, _ := os.ReadFile(root)
+
+	out.Reset()
+	changed, err := runMigrations(&MigrateContext{Dir: dir, Out: &out}, false)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if changed {
+		t.Errorf("second run must be a no-op, output: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "nothing to migrate") {
+		t.Errorf("second run: want 'nothing to migrate', got %q", out.String())
+	}
+	afterSecond, _ := os.ReadFile(root)
+	if !bytes.Equal(afterFirst, afterSecond) {
+		t.Error("second run modified the already-migrated config")
+	}
+}
+
+// TestStripEntityVersionKey_RemovesEntityBodyOnly: the walk removes a direct
+// `version:` child of candy/box/deploy entity bodies, leaving a same-named key
+// nested deeper inside an entity untouched.
+func TestStripEntityVersionKey_RemovesEntityBodyOnly(t *testing.T) {
+	in := "" +
+		"mycandy:\n" +
+		"  candy:\n" +
+		"    version: 2026.186.0100\n" +
+		"    description: d\n" +
+		"mybox:\n" +
+		"  box:\n" +
+		"    version: 2026.186.0100\n" +
+		"mydeploy:\n" +
+		"  deploy:\n" +
+		"    version: 2026.186.0100\n" +
+		"    nested:\n" +
+		"      version: keep-me\n"
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(in), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if !stripEntityVersionKey(&doc) {
+		t.Fatal("expected entity version keys to be stripped")
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	_ = enc.Close()
+	got := buf.String()
+	if strings.Contains(got, "version: 2026.186.0100") {
+		t.Errorf("an entity-body version: survived:\n%s", got)
+	}
+	if !strings.Contains(got, "version: keep-me") {
+		t.Errorf("a nested version: key was incorrectly removed:\n%s", got)
+	}
+	if stripEntityVersionKey(&doc) {
+		t.Error("second pass changed an already-stripped doc")
 	}
 }
 
@@ -414,15 +491,12 @@ func TestBuildTransform_RegisteredHook(t *testing.T) {
 	}
 }
 
-// TestRunMigrations_ProjectAtHeadOverlayLags: a project already at HEAD must NOT
-// short-circuit a LAGGING per-host overlay — the touches_host chain + the
-// universal stamp bring the overlay up (the pre-fix behavior left operators in
-// an unresolvable "Run: charly migrate" loop: every deploy-state write refused
-// the old overlay schema while migrate reported nothing to do).
-func TestRunMigrations_ProjectAtHeadOverlayLags(t *testing.T) {
-	dir := writeRoot(t, spec.SchemaVersion)
+// TestRunMigrations_StripsOverlayVersionStamp: in full mode the per-host overlay's
+// top-level `version:` stamp is stripped too, and the run is idempotent.
+func TestRunMigrations_StripsOverlayVersionStamp(t *testing.T) {
+	dir := writeRoot(t)
 	overlay := filepath.Join(t.TempDir(), "charly.yml")
-	body := "version: " + spec.SchemaFloor + "\ngithubrunner:\n    pod:\n        image: githubrunner\n"
+	body := "version: 2026.186.2323\ngithubrunner:\n    pod:\n        image: githubrunner\n"
 	if err := os.WriteFile(overlay, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -432,19 +506,17 @@ func TestRunMigrations_ProjectAtHeadOverlayLags(t *testing.T) {
 		t.Fatalf("runMigrations: %v", err)
 	}
 	if !changed {
-		t.Fatalf("lagging overlay must be migrated; output: %q", out.String())
+		t.Fatalf("overlay version stamp must be stripped; output: %q", out.String())
 	}
 	after, err := os.ReadFile(overlay)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(after), "version: "+spec.SchemaVersion) {
-		t.Errorf("overlay not stamped to head:\n%s", after)
+	if strings.Contains(string(after), "version:") {
+		t.Errorf("overlay version: survived:\n%s", after)
 	}
-	// The project root must be untouched (idempotent chain, no spurious rewrite).
-	root, _ := os.ReadFile(filepath.Join(dir, "charly.yml"))
-	if !strings.Contains(string(root), "version: "+spec.SchemaVersion) {
-		t.Error("project root version changed unexpectedly")
+	if !strings.Contains(string(after), "githubrunner:") {
+		t.Errorf("overlay content damaged:\n%s", after)
 	}
 	// Second run: full no-op.
 	out.Reset()

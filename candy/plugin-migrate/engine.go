@@ -1,22 +1,19 @@
 package migrate
 
-// engine.go — the CUE-anchored declarative migration engine (`charly
-// migrate`). It replaced the retired 47-step hand-written chain (candy/plugin-
-// migrate) at the migration-baseline reset. There are two moving parts:
+// engine.go — the shape-driven, VERSION-FREE declarative migration engine
+// (`charly migrate`). There are no schema HEAD/floor and no version stamp: the
+// authored `version:` field was removed from the schema, so a charly.yml still
+// carrying it is an unknown field and fails closed-CUE. `charly migrate` is a
+// pure, idempotent reshape pass. There are two moving parts:
 //
-//   1. A CUE-owned schema version (sdk/schema/version.cue → spec.SchemaVersion /
-//      spec.SchemaFloor, parsed by kit.LatestSchemaVersion() / kit.SchemaFloor()).
-//   2. A declarative migration TABLE (charly/migrations.cue), validated at process
-//      start against #Migration and interpreted by ONE generic op-walker. A future
-//      migration is DATA (rename_key / delete_key / remap_scalar / move_key) — zero
-//      new Go for the common case; a structural reshape registers one goHooks entry.
+//   1. A declarative migration TABLE (migrations.cue), validated at process start
+//      against #Migration and interpreted by ONE generic op-walker. It is an
+//      ORDERED list — steps run in declaration order and each MUST be idempotent.
+//   2. A universal final `strip-version-stamp` step that removes the top-level and
+//      per-entity `version:` keys a pre-cutover file may still carry.
 //
-// runMigrations is floor-gated: a config AT head is a no-op; a config BELOW the
-// floor is unmigratable (the chain that once handled older formats is gone); a
-// config in [floor, head) runs the table's newer steps then re-stamps to head. At
-// the reset the table is empty and floor == head, so `charly migrate` only ever
-// says "nothing to migrate" or refuses a below-floor config — the honest state
-// after dropping the migration history; the engine is scaffolding for the future.
+// A future migration is DATA (rename_key / delete_key / remap_scalar / move_key) —
+// zero new Go for the common case; a structural reshape registers one goHooks entry.
 
 import (
 	"bytes"
@@ -35,18 +32,14 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/opencharly/sdk/kit"
-	sdkschema "github.com/opencharly/spec/schema"
-	"github.com/opencharly/spec/schemaconcat"
 	"github.com/opencharly/spec/spec"
 )
 
 // migCtx is the plugin-local CUE context (this plugin owns the migration engine, so it
 // no longer shares charly's core cueSchemaCtx). migrationSchema is #Migration compiled
-// standalone: this plugin's OWN schema/migration.cue (embedded below — a plugin-only
-// schema living in its plugin per the kernel/plugin boundary law, not the SDK contract)
-// concatenated with the SDK's version.cue (#CanonCalVer, which #Migration.version pins
-// to and which STAYS the SDK's single source of truth), so the plugin validates the
-// table WITHOUT pulling charly's full ingress schema and WITHOUT duplicating #CanonCalVer.
+// standalone from this plugin's OWN schema/migration.cue (embedded below — a plugin-only
+// schema living in its plugin per the kernel/plugin boundary law, not the SDK contract) —
+// it pulls neither charly's full ingress schema nor any SDK version def (there is none).
 
 //go:embed schema/migration.cue
 var migrationSchemaCUE []byte
@@ -57,17 +50,7 @@ var (
 )
 
 func compileMigrationDefs() cue.Value {
-	// Keep ONLY version.cue from the SDK schema (for #CanonCalVer), then append this
-	// plugin's own migration.cue — the two compile as one unit so #Migration.version
-	// resolves against the SDK-owned #CanonCalVer.
-	versionBody, _, err := schemaconcat.ConcatSchema(sdkschema.FS, ".", func(name string) bool {
-		return name != "version.cue"
-	})
-	if err != nil {
-		panic(fmt.Sprintf("compileMigrationDefs: concat SDK version.cue: %v", err))
-	}
-	body := versionBody + "\n" + string(migrationSchemaCUE)
-	v := migCtx.CompileString(body)
+	v := migCtx.CompileString(string(migrationSchemaCUE))
 	if v.Err() != nil {
 		panic(fmt.Sprintf("compileMigrationDefs: #Migration schema does not compile: %v", cueerrors.Details(v.Err(), nil)))
 	}
@@ -83,7 +66,6 @@ var migrationsCUE []byte
 
 // migration is one decoded table step. Exactly one of Ops / Apply is set.
 type migration struct {
-	Version     kit.CalVer
 	Name        string
 	TouchesHost bool
 	Ops         []migrationOp
@@ -116,15 +98,17 @@ var goHooks = map[string]func(*yaml.Node) bool{
 	"recordFieldToInstrument": recordFieldToInstrument, // deploy record: field → instrument: entry harvest (reshape_record_field.go)
 	"unrollGroupDeploy":       unrollGroupDeploy,       // targetless deploy group: node → primary substrate + deploy-level siblings (reshape_group_deploy.go)
 	"reshapeDeployCPU":        reshapeDeployCPU,        // deploy override cpus: → cpu: direct-child rename, path-scoped (reshape_deploy_cpu.go)
+	"rekeyLegacyVMOverlay":    rekeyLegacyVMOverlay,    // per-host overlay legacy vm:<identity> deploy keys → drop-on-twin / hard-error (reshape_rekey_vm_overlay.go)
 }
 
-// migrationTable is the validated, ascending-ordered step list, loaded once at
+// migrationTable is the validated, declaration-ordered step list, loaded once at
 // process start. A malformed table panics here (fail-fast, like registerCueKind).
 var migrationTable = loadMigrationTable()
 
-// loadMigrationTable compiles charly/migrations.cue, validates each entry against
-// #Migration (from the shared compiled schema), enforces exactly-one ops/apply +
-// strictly-ascending canonical versions + a registered hook name, and decodes.
+// loadMigrationTable compiles migrations.cue, validates each entry against
+// #Migration (from the compiled plugin schema), enforces exactly-one ops/apply + a
+// registered hook name, and decodes. The table is a plain ordered list — there is no
+// version to validate.
 func loadMigrationTable() []migration {
 	v := migCtx.CompileString(string(migrationsCUE))
 	if v.Err() != nil {
@@ -143,14 +127,12 @@ func loadMigrationTable() []migration {
 		panic(fmt.Sprintf("migrations.cue: `migrations:` is not a list: %v", err))
 	}
 	var out []migration
-	var prev kit.CalVer
 	for i := 0; iter.Next(); i++ {
 		elem := iter.Value()
 		if verr := elem.Unify(migDef).Validate(cue.Concrete(true)); verr != nil {
 			panic(fmt.Sprintf("migrations.cue: step %d invalid: %v", i, cueerrors.Details(verr, nil)))
 		}
 		var raw struct {
-			Version     string        `json:"version"`
 			Name        string        `json:"name"`
 			TouchesHost bool          `json:"touches_host"`
 			Ops         []migrationOp `json:"ops"`
@@ -158,6 +140,9 @@ func loadMigrationTable() []migration {
 		}
 		if derr := elem.Decode(&raw); derr != nil {
 			panic(fmt.Sprintf("migrations.cue: step %d decode: %v", i, derr))
+		}
+		if raw.Name == "" {
+			panic(fmt.Sprintf("migrations.cue: step %d has an empty name", i))
 		}
 		if (len(raw.Ops) > 0) == (raw.Apply != "") {
 			panic(fmt.Sprintf("migrations.cue: step %q must set EXACTLY one of `ops:` or `apply:`", raw.Name))
@@ -167,24 +152,15 @@ func loadMigrationTable() []migration {
 				panic(fmt.Sprintf("migrations.cue: step %q names unknown Go hook %q (register it in goHooks)", raw.Name, raw.Apply))
 			}
 		}
-		ver, ok := kit.ParseCalVer(raw.Version)
-		if !ok {
-			panic(fmt.Sprintf("migrations.cue: step %q has non-canonical version %q", raw.Name, raw.Version))
-		}
-		if i > 0 && !prev.Less(ver) {
-			panic(fmt.Sprintf("migrations.cue: step %q version %s is not strictly after the previous step %s", raw.Name, ver, prev))
-		}
-		if ver.Less(kit.SchemaFloor()) || kit.LatestSchemaVersion().Less(ver) {
-			panic(fmt.Sprintf("migrations.cue: step %q version %s is outside the migratable window [%s, %s]", raw.Name, ver, kit.SchemaFloor(), kit.LatestSchemaVersion()))
-		}
-		prev = ver
-		out = append(out, migration{Version: ver, Name: raw.Name, TouchesHost: raw.TouchesHost, Ops: raw.Ops, Apply: raw.Apply})
+		out = append(out, migration{Name: raw.Name, TouchesHost: raw.TouchesHost, Ops: raw.Ops, Apply: raw.Apply})
 	}
 	return out
 }
 
-// runMigrations brings the project (and, unless projectOnly, the per-host overlay)
-// up to the head schema. Returns whether anything changed.
+// runMigrations applies EVERY table step in declaration order to the project files
+// (and, unless projectOnly, to the per-host overlay for touches_host steps), then runs
+// the universal strip-version-stamp step. Each step is idempotent, so running the whole
+// set is a no-op on an already-current file. Returns whether anything changed.
 func runMigrations(ctx *MigrateContext, projectOnly bool) (bool, error) {
 	if ctx == nil {
 		return false, errors.New("migrate: nil context")
@@ -193,92 +169,28 @@ func runMigrations(ctx *MigrateContext, projectOnly bool) (bool, error) {
 	if out == nil {
 		out = io.Discard
 	}
-	head := kit.LatestSchemaVersion()
-	floor := kit.SchemaFloor()
 
 	rootPath := filepath.Join(ctx.Dir, spec.UnifiedFileName)
-	data, err := os.ReadFile(rootPath)
-	if err != nil {
+	if _, err := os.ReadFile(rootPath); err != nil {
 		if os.IsNotExist(err) {
 			_, _ = fmt.Fprintf(out, "no %s in %s — nothing to migrate\n", spec.UnifiedFileName, ctx.Dir)
 			return false, nil
 		}
 		return false, fmt.Errorf("reading %s: %w", rootPath, err)
 	}
-	ver := kit.FirstYAMLVersionLine(data)
-	fileVer, ok := kit.ParseCalVer(ver)
 
-	// Per-host overlay schema state (full mode only). The overlay migrates on
-	// the SAME chain (touches_host entries + the universal stamp) — a project
-	// already at head must NOT short-circuit a lagging overlay, or the operator
-	// is stuck in an unresolvable "Run: charly migrate" loop (every deploy-state
-	// write refuses the old overlay schema while migrate reports nothing to do).
-	overlayVer := kit.CalVer{}
-	overlayLags := false
-	if !projectOnly && ctx.HostDeployPath != "" {
-		if od, oerr := os.ReadFile(ctx.HostDeployPath); oerr == nil {
-			oraw := kit.FirstYAMLVersionLine(od)
-			ocv, ook := kit.ParseCalVer(oraw)
-			switch {
-			case ook && head.Less(ocv):
-				return false, fmt.Errorf(
-					"%s: schema %s is newer than this charly supports (max %s) — update charly (reinstall the latest opencharly package, or `task build:binary` from a fresh checkout and use ./bin/charly)",
-					ctx.HostDeployPath, oraw, head)
-			case ook && ocv == head:
-				// overlay already current
-			case !ook || ocv.Less(floor):
-				return false, fmt.Errorf(
-					"%s: schema %q predates the supported floor %s and cannot be migrated — the historical migration chain was removed at the %s baseline reset. Re-author this per-host overlay against the current schema (a current overlay carries `version: %s`)",
-					ctx.HostDeployPath, oraw, floor, head, head)
-			default:
-				overlayVer, overlayLags = ocv, true
-			}
-		}
-	}
-
-	switch {
-	case ok && head.Less(fileVer):
-		return false, fmt.Errorf(
-			"%s: schema %s is newer than this charly supports (max %s) — update charly (reinstall the latest opencharly package, or `task build:binary` from a fresh checkout and use ./bin/charly)",
-			rootPath, ver, head)
-	case ok && fileVer == head:
-		if !overlayLags {
-			_, _ = fmt.Fprintf(out, "already at schema %s; nothing to migrate\n", head)
-			return false, nil
-		}
-		// Project at head, overlay behind: fall through — the chain is
-		// idempotent on the already-migrated project and brings the overlay up.
-	case !ok || fileVer.Less(floor):
-		return false, fmt.Errorf(
-			"%s: schema %q predates the supported floor %s and cannot be migrated — the historical migration chain was removed at the %s baseline reset. Re-author this config against the current schema (a current config carries `version: %s`)",
-			rootPath, ver, floor, head, head)
-	}
-
-	// floor <= version < head (project and/or overlay): apply the table's newer
-	// steps to each LAGGING side, then re-stamp to head. The sides gate
-	// independently — a project at head with a lagging overlay runs only the
-	// touches_host leg of each pending entry.
 	var applied []string
 	for _, m := range migrationTable {
-		projectNeeds := fileVer.Less(m.Version)
-		hostNeeds := m.TouchesHost && !projectOnly && overlayLags && overlayVer.Less(m.Version)
-		if !projectNeeds && !hostNeeds {
-			continue // both sides already covered by their current versions
-		}
 		transform, terr := buildTransform(m)
 		if terr != nil {
 			return len(applied) > 0, terr
 		}
-		var files []string
-		var ferr error
-		if projectNeeds {
-			files, ferr = runDocMigration(ctx.Dir, ctx.DryRun, kit.OpUnifyCandidateFiles, transform)
-			if ferr != nil {
-				return len(applied) > 0, ferr
-			}
+		files, ferr := runDocMigration(ctx.Dir, ctx.DryRun, kit.OpUnifyCandidateFiles, transform)
+		if ferr != nil {
+			return len(applied) > 0, ferr
 		}
 		hostChanged := false
-		if hostNeeds {
+		if m.TouchesHost && !projectOnly {
 			hostChanged, ferr = migrateHostOverlayDoc(ctx, transform)
 			if ferr != nil {
 				return len(applied) > 0, ferr
@@ -286,20 +198,23 @@ func runMigrations(ctx *MigrateContext, projectOnly bool) (bool, error) {
 		}
 		if len(files) > 0 || hostChanged {
 			applied = append(applied, m.Name)
-			_, _ = fmt.Fprintf(out, "applied %s (schema %s)\n", m.Name, m.Version)
+			_, _ = fmt.Fprintf(out, "applied %s\n", m.Name)
 		}
 	}
-	stamped, serr := universalStamp(ctx, head, projectOnly)
+	stripped, serr := stripVersionStamp(ctx, projectOnly)
 	if serr != nil {
 		return len(applied) > 0, serr
 	}
-	changed := len(applied) > 0 || len(stamped) > 0
-	if changed {
-		_, _ = fmt.Fprintf(out, "migrated to schema %s\n", head)
-	} else {
-		_, _ = fmt.Fprintf(out, "nothing to migrate (already at schema %s)\n", head)
+	if len(stripped) > 0 {
+		applied = append(applied, "strip-version-stamp")
+		_, _ = fmt.Fprintf(out, "applied strip-version-stamp\n")
 	}
-	return changed, nil
+	if len(applied) > 0 {
+		_, _ = fmt.Fprintf(out, "migrated\n")
+	} else {
+		_, _ = fmt.Fprintf(out, "nothing to migrate\n")
+	}
+	return len(applied) > 0, nil
 }
 
 // buildTransform returns the per-document transform for a step: the generic
@@ -485,20 +400,24 @@ func childMapping(m *yaml.Node, key string) *yaml.Node {
 }
 
 // ---------------------------------------------------------------------------
-// universal version stamp
+// universal version-stamp removal
 // ---------------------------------------------------------------------------
 
-// universalStampFiles are the project files carrying a top-level schema `version:`
-// stamp. In the single-filename world that is charly.yml alone (box/candy manifests
-// carry a per-ENTITY version nested under their kind value, never a top-level stamp).
+// universalStampFiles are the project files that historically carried a top-level
+// schema `version:` stamp. In the single-filename world that is charly.yml alone
+// (box/candy manifests carry a per-ENTITY version nested under their kind value,
+// never a top-level stamp).
 var universalStampFiles = []string{spec.UnifiedFileName}
 
-// universalStamp rewrites the top-level `version:` of every stamped project file
-// (and, unless projectOnly, the per-host overlay) to head. Returns changed paths.
-func universalStamp(ctx *MigrateContext, head kit.CalVer, projectOnly bool) ([]string, error) {
+// stripVersionStamp is the universal final migration step: it REMOVES the top-level
+// `version:` key from every universalStampFiles entry (and, unless projectOnly, the
+// per-host overlay), then removes the per-entity `version:` key from every authored
+// candy/box/deploy entity body in the project files (and the overlay). Returns the
+// changed paths. Idempotent — a file with no version keys is untouched.
+func stripVersionStamp(ctx *MigrateContext, projectOnly bool) ([]string, error) {
 	var changed []string
 	for _, name := range universalStampFiles {
-		did, err := stampVersionField(filepath.Join(ctx.Dir, name), head.String(), ctx.DryRun)
+		did, err := stripVersionField(filepath.Join(ctx.Dir, name), ctx.DryRun)
 		if err != nil {
 			return changed, err
 		}
@@ -507,7 +426,7 @@ func universalStamp(ctx *MigrateContext, head kit.CalVer, projectOnly bool) ([]s
 		}
 	}
 	if !projectOnly && ctx.HostDeployPath != "" {
-		did, err := stampVersionField(ctx.HostDeployPath, head.String(), ctx.DryRun)
+		did, err := stripVersionField(ctx.HostDeployPath, ctx.DryRun)
 		if err != nil {
 			return changed, err
 		}
@@ -515,14 +434,27 @@ func universalStamp(ctx *MigrateContext, head kit.CalVer, projectOnly bool) ([]s
 			changed = append(changed, ctx.HostDeployPath)
 		}
 	}
+	files, err := runDocMigration(ctx.Dir, ctx.DryRun, kit.OpUnifyCandidateFiles, stripEntityVersionKey)
+	if err != nil {
+		return changed, err
+	}
+	changed = append(changed, files...)
+	if !projectOnly && ctx.HostDeployPath != "" {
+		hostChanged, herr := rewriteDocFile(ctx.HostDeployPath, ctx.DryRun, stripEntityVersionKey)
+		if herr != nil {
+			return changed, herr
+		}
+		if hostChanged {
+			changed = append(changed, ctx.HostDeployPath)
+		}
+	}
 	return changed, nil
 }
 
-// stampVersionField rewrites the first top-level `version:` line of one file to
-// `version: <want>`, preserving any trailing comment. Returns (changed, err);
-// changed is false when the file is absent, has no top-level version: key, or is
-// already at want. A <path>.bak.<unix-ts> rollback is written before any rewrite.
-func stampVersionField(path, want string, dryRun bool) (bool, error) {
+// stripVersionField DELETES the first top-level `version:` line of one file. Returns
+// (changed, err); changed is false when the file is absent or has no top-level
+// `version:` key. A <path>.bak.<unix-ts> rollback is written before any rewrite.
+func stripVersionField(path string, dryRun bool) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -541,13 +473,6 @@ func stampVersionField(path, want string, dryRun bool) (bool, error) {
 	if idx == -1 {
 		return false, nil // no top-level version: key
 	}
-	newLine := "version: " + want
-	if h := strings.Index(lines[idx], "#"); h >= 0 {
-		newLine += "  " + strings.TrimSpace(lines[idx][h:])
-	}
-	if lines[idx] == newLine {
-		return false, nil // already stamped
-	}
 	if dryRun {
 		return true, nil
 	}
@@ -555,11 +480,57 @@ func stampVersionField(path, want string, dryRun bool) (bool, error) {
 	if err := os.WriteFile(backup, data, 0o644); err != nil {
 		return false, fmt.Errorf("writing backup %s: %w", backup, err)
 	}
-	lines[idx] = newLine
+	lines = append(lines[:idx], lines[idx+1:]...)
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
 		return false, fmt.Errorf("writing %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// stripEntityVersionKey removes a direct `version:` child from every authored
+// candy/box/deploy entity body (the per-entity stamp that lived under the kind
+// discriminator). It mirrors stripCandyLibvirtField's walk style: a mapping that
+// directly carries a `candy:`/`box:`/`deploy:` key is an entity wrapper, and the
+// version is a direct child of that kind's value mapping — never a same-named key
+// nested deeper inside the entity.
+func stripEntityVersionKey(doc *yaml.Node) bool {
+	root := doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		root = root.Content[0]
+	}
+	return stripEntityVersionKeyRec(root)
+}
+
+// stripEntityVersionKeyRec walks the whole document tree (entity member nesting is a
+// general document capability, so it recurses defensively) and removes a direct
+// `version:` child of every candy/box/deploy entity body it finds.
+func stripEntityVersionKeyRec(n *yaml.Node) bool {
+	if n == nil {
+		return false
+	}
+	changed := false
+	switch n.Kind {
+	case yaml.DocumentNode, yaml.SequenceNode:
+		for _, c := range n.Content {
+			if stripEntityVersionKeyRec(c) {
+				changed = true
+			}
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key, val := n.Content[i], n.Content[i+1]
+			switch key.Value {
+			case "candy", "box", "deploy":
+				if val.Kind == yaml.MappingNode && deleteDirectChildKey(val, "version") {
+					changed = true
+				}
+			}
+			if stripEntityVersionKeyRec(val) {
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // ---------------------------------------------------------------------------
