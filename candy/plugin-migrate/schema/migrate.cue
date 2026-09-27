@@ -1,17 +1,19 @@
 // plugin-migrate's OWN self-contained CUE schema — the SINGLE SOURCE for this plugin's
-// declaration surface, served over the Describe channel (there is no schema-less
-// plugin). SELF-CONTAINED: it references no base def, so it compiles STANDALONE (the
-// property the SDK's serve-side compile and `cue exp gengotypes` both need).
+// served declaration surface (there is no schema-less plugin: every plugin ships a
+// non-empty schema over Describe).
 //
-// This is the schema SERVED over Describe. The engine-internal migration TABLE schema
-// (schema/migration.cue, #Migration / #MigrationOp) is deliberately NOT served: it pins
-// the SDK-owned #CanonCalVer and is embedded SEPARATELY by engine.go to validate the
-// declarative table at process start. Serving it here would drag a base reference into
-// a schema that must compile standalone.
+// SELF-CONTAINED and PACKAGE-LESS: it references no base def and carries no package
+// clause, so it compiles STANDALONE — the property the SDK's serve-side compile needs
+// and the property that lets the host splice `base ++ plugin` at the load gate
+// (registerPluginUnitSchema); a self-contained schema that will not splice is a LOUD
+// load failure.
 //
-// `command:migrate`'s authored input is its pass-through CLI grammar (`migrate
-// --dry-run` etc.), not a structured plugin_input, so this schema DOCUMENTS the command
-// contract.
+// NO GO CONSUMER: the plugin declares no typed `plugin_input` (its authored input is
+// its pass-through CLI grammar), so this schema generates NO `params` package and has
+// NO `cue exp gengotypes` artifact — it is the SERVED documentation/config surface,
+// not a code-generation source.
+//
+// It DOCUMENTS the `command: migrate` contract. The engine-internal migration TABLE schema (`schema/migration.cue`, `#Migration` / `#MigrationOp`) is embedded SEPARATELY by `engine.go` and deliberately NOT served here.
 #MigratePlugin: {
 	// The command word the plugin serves.
 	command: "migrate"
