@@ -528,3 +528,40 @@ func TestRunMigrations_StripsOverlayVersionStamp(t *testing.T) {
 		t.Errorf("second run must be a no-op, output: %q", out.String())
 	}
 }
+
+// TestRunMigrations_StripsCandyManifestTopLevelStamp pins the fix for the remote-cache
+// migration gap: the top-level `version:` stamp ALSO rides every CANDY manifest
+// (candy/<name>/charly.yml) — not just the root charly.yml — and the migration must
+// strip it, or an imported candy manifest fails the #NodeDoc gate ("node \"version\":
+// #NodeDoc.version: conflicting values …"). Before the fix the root stamp was stripped
+// but the candy manifest's top-level stamp survived.
+func TestRunMigrations_StripsCandyManifestTopLevelStamp(t *testing.T) {
+	dir := t.TempDir()
+	candyDir := filepath.Join(dir, "candy", "mycandy")
+	if err := os.MkdirAll(candyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "charly.yml"), []byte("discover:\n    - path: candy\n      recursive: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(candyDir, "charly.yml")
+	body := "version: 2026.240.1943\nmycandy:\n  candy:\n    description: d\n"
+	if err := os.WriteFile(manifest, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	changed, err := runMigrations(&MigrateContext{Dir: dir, Out: &out}, false)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected the candy manifest's top-level stamp to be stripped; output: %q", out.String())
+	}
+	after, _ := os.ReadFile(manifest)
+	if strings.Contains(string(after), "version:") {
+		t.Errorf("a candy top-level version: key survived:\n%s", after)
+	}
+	if !strings.Contains(string(after), "description: d") {
+		t.Errorf("unrelated fields damaged:\n%s", after)
+	}
+}
