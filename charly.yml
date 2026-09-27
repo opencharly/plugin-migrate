@@ -8,7 +8,6 @@
 # Declaring discover: is the whole fix: the candy is scanned, the CUE schema gate
 # applies, and the STOCK `charly box validate` step starts working with no workflow
 # change. This file also declares the R10 witness bed (below).
-version: 2026.249.2125
 discover:
     - path: candy
       recursive: true
@@ -28,40 +27,35 @@ check-migrate-local:
         disposable: true
         lifecycle: dev
         description: >-
-            Sole proof of the externalized config-schema MIGRATION ENGINE (candy/plugin-migrate, command:migrate — M15). A disposable kind:local deploy on host: local runs `charly migrate` host-side against mktemp fixtures: the host charly resolves command:migrate from the compiled-in registry and Invoke(OpRun) runs the engine in-proc, proving the engine relocation (at-HEAD no-op, --dry-run plumbing, below-floor refusal) end-to-end on a fresh rebuild; the declarative transform ops are covered by the plugin's engine_test.go units.
+            Sole proof of the externalized config-schema MIGRATION ENGINE (candy/plugin-migrate, command:migrate — M15). A disposable kind:local deploy on host: local runs `charly migrate` host-side against mktemp fixtures: the host charly resolves command:migrate from the compiled-in registry and Invoke(OpRun) runs the engine in-proc, proving the engine relocation (the universal strip-version-stamp step, idempotency, --dry-run plumbing) end-to-end on a fresh rebuild; the declarative transform ops are covered by the plugin's engine_test.go units.
         plan:
-            - check: charly migrate on an at-HEAD config is a no-op (exit 0, "nothing to migrate")
-              id: migrate-at-head-noop
+            - check: charly migrate strips a retired top-level version stamp from a project AND its candy manifest (exit 0, "applied strip-version-stamp")
+              id: migrate-strips-version-stamp
+              exit_status: 0
+              stderr:
+                - contains: 'applied strip-version-stamp'
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); mkdir -p "$d/candy/x"; printf "discover:\n    - path: candy\n      recursive: true\n" > "$d/charly.yml"; printf "version: 2026.240.1943\nx:\n  candy:\n    description: d\n    plan:\n      - check: c\n        file: /x\n" > "$d/candy/x/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; grep -q "^version:" "$d/candy/x/charly.yml" && rc=1; rm -rf "$d"; exit $rc'
+                in_container: false
+            - check: a versionless project is a no-op (exit 0, "nothing to migrate") — idempotency
+              id: migrate-idempotent-noop
               exit_status: 0
               stderr:
                 - contains: 'nothing to migrate'
               context:
                 - runtime
-              # Targets THIS project's own charly.yml, which is always stamped at
-              # the schema HEAD — so the fixture cannot go stale when the schema
-              # bumps. (A hard-coded CalVer here DID go stale: the bed asserted a
-              # no-op on 2026.240.1943 while HEAD had moved to 2026.249.2125, so
-              # the run actually migrated instead of no-op'ing.)
               command:
-                command: '${CHARLY_BIN} migrate --dir . --project-only'
+                command: 'd=$(mktemp -d); printf "discover:\n    - path: candy\n      recursive: true\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
                 in_container: false
-            - check: charly migrate --dry-run touches nothing (exit 0, prints the dry-run trailer)
-              id: migrate-dry-run-noop
+            - check: charly migrate --dry-run reports the plan and touches nothing (exit 0, prints the dry-run trailer)
+              id: migrate-dry-run
               exit_status: 0
               stderr:
                 - contains: '(dry-run — no files were modified)'
               context:
                 - runtime
               command:
-                command: 'd=$(mktemp -d); printf "version: 2026.174.1100\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only --dry-run; rc=$?; rm -rf "$d"; exit $rc'
-                in_container: false
-            - check: a below-floor config is refused (exit 1, "predates the supported floor")
-              id: migrate-below-floor-refused
-              exit_status: 1
-              stderr:
-                - contains: 'predates the supported floor'
-              context:
-                - runtime
-              command:
-                command: 'd=$(mktemp -d); printf "version: 2026.001.0000\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
+                command: 'd=$(mktemp -d); printf "version: 2026.240.1943\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only --dry-run; rc=$?; grep -q "^version:" "$d/charly.yml" || rc=1; rm -rf "$d"; exit $rc'
                 in_container: false

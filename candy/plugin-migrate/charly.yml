@@ -1,7 +1,5 @@
-version: 2026.232.0520
 plugin-migrate:
     candy:
-        version: 2026.186.0100
         description: |-
             COMPILED-IN charly plugin owning the config-schema MIGRATION ENGINE (M15 — migrate
             OUT of core). It serves ONE capability:
