@@ -13,6 +13,7 @@ package migrate
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,17 +22,22 @@ import (
 	pb "github.com/opencharly/spec/proto"
 )
 
+//go:embed schema/migrate.cue
+var schemaFS embed.FS
+
 const calver = "2026.186.0100"
 
 // NewProvider returns the migrate command provider (the in-proc OpRun dispatch surface the
 // host's `charly migrate` + refs.go auto-migration invoke).
 func NewProvider() pb.ProviderServer { return &provider{} }
 
-// NewMeta advertises command:migrate + the plugin's self-contained CUE schema via sdk.NewMeta.
+// NewMeta advertises command:migrate + the plugin's self-contained CUE schema (schema/migrate.cue)
+// via sdk.NewMeta. The engine-internal migration TABLE schema (schema/migration.cue) is embedded
+// separately by engine.go and is NOT the Describe schema — it pins the SDK-owned #CanonCalVer.
 func NewMeta() pb.PluginMetaServer {
 	return sdk.NewMeta(calver,
 		[]sdk.ProvidedCapability{{Class: "command", Word: "migrate"}},
-		nil)
+		schemaFS)
 }
 
 // CliMain is the plugin's CLI entrypoint (command:migrate dispatch — `charly migrate …`).
