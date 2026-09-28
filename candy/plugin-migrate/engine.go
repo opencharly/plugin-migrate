@@ -185,7 +185,7 @@ func runMigrations(ctx *MigrateContext, projectOnly bool) (bool, error) {
 		if terr != nil {
 			return len(applied) > 0, terr
 		}
-		files, ferr := runDocMigration(ctx.Dir, ctx.DryRun, kit.OpUnifyCandidateFiles, transform)
+		files, ferr := runDocMigration(ctx.Dir, ctx.Dir, ctx.DryRun, kit.OpUnifyCandidateFiles, transform, ctx.Out)
 		if ferr != nil {
 			return len(applied) > 0, ferr
 		}
@@ -417,7 +417,7 @@ var universalStampFiles = []string{spec.UnifiedFileName}
 func stripVersionStamp(ctx *MigrateContext, projectOnly bool) ([]string, error) {
 	var changed []string
 	for _, name := range universalStampFiles {
-		did, err := stripVersionField(filepath.Join(ctx.Dir, name), ctx.DryRun)
+		did, err := stripVersionField(ctx.Dir, filepath.Join(ctx.Dir, name), ctx.DryRun, ctx.Out)
 		if err != nil {
 			return changed, err
 		}
@@ -432,7 +432,7 @@ func stripVersionStamp(ctx *MigrateContext, projectOnly bool) ([]string, error) 
 	// stripVersionField is idempotent (a file with no top-level stamp is
 	// untouched), so re-visiting the root is a no-op.
 	for _, p := range kit.OpUnifyCandidateFiles(ctx.Dir) {
-		did, err := stripVersionField(p, ctx.DryRun)
+		did, err := stripVersionField(ctx.Dir, p, ctx.DryRun, ctx.Out)
 		if err != nil {
 			return changed, err
 		}
@@ -441,7 +441,7 @@ func stripVersionStamp(ctx *MigrateContext, projectOnly bool) ([]string, error) 
 		}
 	}
 	if !projectOnly && ctx.HostDeployPath != "" {
-		did, err := stripVersionField(ctx.HostDeployPath, ctx.DryRun)
+		did, err := stripVersionField(ctx.Dir, ctx.HostDeployPath, ctx.DryRun, ctx.Out)
 		if err != nil {
 			return changed, err
 		}
@@ -449,13 +449,13 @@ func stripVersionStamp(ctx *MigrateContext, projectOnly bool) ([]string, error) 
 			changed = append(changed, ctx.HostDeployPath)
 		}
 	}
-	files, err := runDocMigration(ctx.Dir, ctx.DryRun, kit.OpUnifyCandidateFiles, stripEntityVersionKey)
+	files, err := runDocMigration(ctx.Dir, ctx.Dir, ctx.DryRun, kit.OpUnifyCandidateFiles, stripEntityVersionKey, ctx.Out)
 	if err != nil {
 		return changed, err
 	}
 	changed = append(changed, files...)
 	if !projectOnly && ctx.HostDeployPath != "" {
-		hostChanged, herr := rewriteDocFile(ctx.HostDeployPath, ctx.DryRun, stripEntityVersionKey)
+		hostChanged, herr := rewriteDocFile(ctx.Dir, ctx.HostDeployPath, ctx.DryRun, stripEntityVersionKey, ctx.Out)
 		if herr != nil {
 			return changed, herr
 		}
@@ -466,10 +466,95 @@ func stripVersionStamp(ctx *MigrateContext, projectOnly bool) ([]string, error) 
 	return changed, nil
 }
 
+// ---------------------------------------------------------------------------
+// migration rollback backups — ONE gitignored location under the migrate root
+// ---------------------------------------------------------------------------
+
+const (
+	// migrationStateDir is the per-project migrate state dir. Its own .gitignore
+	// ignores the WHOLE tree (see migrationGitignore), so nothing under it ever
+	// appears in `git status` — in ANY repo, with no per-repo .gitignore edit.
+	migrationStateDir = ".charly"
+	// migrationGitignore is the content of <root>/.charly/.gitignore. A bare `*`
+	// ignores every entry in .charly/ (including the .gitignore itself), which
+	// makes the untracked directory invisible to `git status` entirely.
+	migrationGitignore = "*\n"
+)
+
+// writeMigrationBackup writes a rollback copy of data for path into the ONE
+// gitignored backup location under root:
+//
+//	<root>/.charly/backups/<relpath-from-root>.<unix-ts>
+//
+// It idempotently ensures <root>/.charly/.gitignore exists with migrationGitignore
+// (a bare `*`), so every rollback copy is invisible to `git status` in every repo
+// WITHOUT a per-repo .gitignore change. The backups stay LOCAL to the tree they
+// protect (never an XDG cache).
+//
+// A path inside root is keyed by its root-relative path. A path OUTSIDE root (the
+// per-host overlay lives at ~/.config/charly/charly.yml, not under the project)
+// is keyed under a synthetic `external/` prefix so it too stays inside the one
+// backup tree — it can never escape via `..`. The result is a traversal-free
+// relpath: the backup NEVER lands outside <root>/.charly/backups/. A path that
+// cleans to root itself is refused (nothing to protect; "" is returned).
+//
+// The ONE helper both rewrite call sites share (R3) — the top-level version-strip
+// and the node-form document rewrite. Returns the backup path written ("" when the
+// path cleans to root).
+func writeMigrationBackup(root, path string, data []byte) (string, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolving migrate root %s: %w", root, err)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolving %s: %w", path, err)
+	}
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		return "", fmt.Errorf("relativizing %s under %s: %w", absPath, absRoot, err)
+	}
+	if rel == "." {
+		return "", nil // path IS the root — nothing to back up
+	}
+	// Path-safety: keep the key traversal-free. A path outside root (or a crafted
+	// `../…`) is re-keyed under `external/` from its cleaned absolute path, which
+	// filepath.Abs+Clean guarantees carries no `..` components — so the backup can
+	// never resolve outside <root>/.charly/backups/.
+	if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		rel = filepath.Join("external", strings.TrimPrefix(filepath.ToSlash(absPath), "/"))
+	}
+
+	stateDir := filepath.Join(absRoot, migrationStateDir)
+	gitignore := filepath.Join(stateDir, ".gitignore")
+	if _, err := os.Stat(gitignore); os.IsNotExist(err) {
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			return "", fmt.Errorf("creating %s: %w", stateDir, err)
+		}
+		if err := os.WriteFile(gitignore, []byte(migrationGitignore), 0o644); err != nil {
+			return "", fmt.Errorf("writing %s: %w", gitignore, err)
+		}
+	}
+
+	// Nanosecond resolution: ONE `charly migrate` run rewrites a given file in more
+	// than one step (the top-level stamp step, then the entity-stamp step), so a
+	// whole-second stamp would let a later backup silently clobber the earlier one
+	// and lose the pre-migration rollback content.
+	backup := fmt.Sprintf("%s.%d", filepath.Join(stateDir, "backups", rel), time.Now().UnixNano())
+	if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
+		return "", fmt.Errorf("creating backup dir for %s: %w", backup, err)
+	}
+	if err := os.WriteFile(backup, data, 0o644); err != nil {
+		return "", fmt.Errorf("writing backup %s: %w", backup, err)
+	}
+	return backup, nil
+}
+
 // stripVersionField DELETES the first top-level `version:` line of one file. Returns
 // (changed, err); changed is false when the file is absent or has no top-level
-// `version:` key. A <path>.bak.<unix-ts> rollback is written before any rewrite.
-func stripVersionField(path string, dryRun bool) (bool, error) {
+// `version:` key. A rollback copy is written to the gitignored <root>/.charly/backups/
+// tree (never adjacent) before any rewrite, and its path is printed to out.
+func stripVersionField(root, path string, dryRun bool, out io.Writer) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -491,9 +576,10 @@ func stripVersionField(path string, dryRun bool) (bool, error) {
 	if dryRun {
 		return true, nil
 	}
-	backup := fmt.Sprintf("%s.bak.%d", path, time.Now().Unix())
-	if err := os.WriteFile(backup, data, 0o644); err != nil {
-		return false, fmt.Errorf("writing backup %s: %w", backup, err)
+	if backup, berr := writeMigrationBackup(root, path, data); berr != nil {
+		return false, berr
+	} else if backup != "" && out != nil {
+		_, _ = fmt.Fprintf(out, "backup: %s\n", backup)
 	}
 	lines = append(lines[:idx], lines[idx+1:]...)
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
@@ -555,8 +641,10 @@ func stripEntityVersionKeyRec(n *yaml.Node) bool {
 // runDocMigration scans candidateFiles(dir), decodes each as a YAML multi-document
 // stream, applies transform to every document, and — when any document changed —
 // re-encodes the whole stream (4-space indent) and writes it back (0o644) unless
-// dryRun. Returns the rewritten paths; unreadable files are skipped.
-func runDocMigration(dir string, dryRun bool, candidateFiles func(string) []string, transform func(*yaml.Node) bool) ([]string, error) {
+// dryRun. A rollback copy of each rewritten file is written to the ONE gitignored
+// <root>/.charly/backups/ tree (never adjacent) and its path is printed to out.
+// Returns the rewritten paths; unreadable files are skipped.
+func runDocMigration(root, dir string, dryRun bool, candidateFiles func(string) []string, transform func(*yaml.Node) bool, out io.Writer) ([]string, error) {
 	var rewritten []string
 	for _, path := range candidateFiles(dir) {
 		data, err := os.ReadFile(path)
@@ -590,6 +678,11 @@ func runDocMigration(dir string, dryRun bool, candidateFiles func(string) []stri
 		}
 		_ = enc.Close()
 		if !dryRun {
+			if backup, berr := writeMigrationBackup(root, path, data); berr != nil {
+				return rewritten, berr
+			} else if backup != "" && out != nil {
+				_, _ = fmt.Fprintf(out, "backup: %s\n", backup)
+			}
 			if werr := os.WriteFile(path, buf.Bytes(), 0o644); werr != nil {
 				return rewritten, fmt.Errorf("writing %s: %w", path, werr)
 			}
@@ -607,13 +700,14 @@ func migrateHostOverlayDoc(ctx *MigrateContext, transform func(*yaml.Node) bool)
 	if ctx.HostDeployPath == "" {
 		return false, nil
 	}
-	return rewriteDocFile(ctx.HostDeployPath, ctx.DryRun, transform)
+	return rewriteDocFile(ctx.Dir, ctx.HostDeployPath, ctx.DryRun, transform, ctx.Out)
 }
 
 // rewriteDocFile reads path, decodes ONE YAML document, applies transform, and —
 // when it changed — re-encodes (4-space indent) and writes it back (0644) unless
-// dryRun, after saving a .bak.<unix-ts> copy. A missing/unparseable file is a no-op.
-func rewriteDocFile(path string, dryRun bool, transform func(*yaml.Node) bool) (bool, error) {
+// dryRun, after saving a rollback copy in the gitignored <root>/.charly/backups/
+// tree (its path printed to out). A missing/unparseable file is a no-op.
+func rewriteDocFile(root, path string, dryRun bool, transform func(*yaml.Node) bool, out io.Writer) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false, nil
@@ -635,8 +729,11 @@ func rewriteDocFile(path string, dryRun bool, transform func(*yaml.Node) bool) (
 	if dryRun {
 		return true, nil
 	}
-	bak := fmt.Sprintf("%s.bak.%d", path, time.Now().Unix())
-	_ = os.WriteFile(bak, data, 0644)
+	if backup, berr := writeMigrationBackup(root, path, data); berr != nil {
+		return false, berr
+	} else if backup != "" && out != nil {
+		_, _ = fmt.Fprintf(out, "backup: %s\n", backup)
+	}
 	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
 		return false, err
 	}
