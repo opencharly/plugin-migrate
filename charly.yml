@@ -39,6 +39,14 @@ check-migrate-local:
               command:
                 command: 'd=$(mktemp -d); mkdir -p "$d/candy/x"; printf "discover:\n    - path: candy\n      recursive: true\n" > "$d/charly.yml"; printf "version: 2026.240.1943\nx:\n  candy:\n    description: d\n    plan:\n      - check: c\n        file: /x\n" > "$d/candy/x/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; grep -q "^version:" "$d/candy/x/charly.yml" && rc=1; rm -rf "$d"; exit $rc'
                 in_container: false
+            - check: migrate writes its rollback backups to the gitignored .charly/ tree, never adjacent (no *.bak in the project, .charly/.gitignore contains *)
+              id: migrate-backup-gitignored
+              exit_status: 0
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); printf "version: 2026.240.1943\ndiscover:\n    - path: candy\n      recursive: true\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; find "$d" -name "*.bak*" | grep -q . && rc=1; test -d "$d/.charly/backups" || rc=1; grep -q "\\*" "$d/.charly/.gitignore" || rc=1; cd "$d" && git init -q && git add -A && git status --porcelain | grep -q "\.charly/" && rc=1; rm -rf "$d"; exit $rc'
+                in_container: false
             - check: a versionless project is a no-op (exit 0, "nothing to migrate") — idempotency
               id: migrate-idempotent-noop
               exit_status: 0

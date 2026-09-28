@@ -3,7 +3,9 @@ package migrate
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -564,4 +566,304 @@ func TestRunMigrations_StripsCandyManifestTopLevelStamp(t *testing.T) {
 	if !strings.Contains(string(after), "description: d") {
 		t.Errorf("unrelated fields damaged:\n%s", after)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// migration rollback backups — ONE gitignored location (never adjacent, never
+// appearing in `git status` in ANY repo without a per-repo .gitignore)
+// ---------------------------------------------------------------------------
+
+// TestWriteMigrationBackup_WritesToGitignoredDir: the shared helper keys a
+// rollback copy under <root>/.charly/backups/<relpath>.<ts>, idempotently
+// installs the inner `.charly/.gitignore` containing `*`, and returns the path it
+// wrote (so rollback is discoverable). No adjacent `.bak` is left beside the file.
+func TestWriteMigrationBackup_WritesToGitignoredDir(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "candy", "widget", "charly.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("version: 2026.248.1030\ndescription: d\n")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backup, err := writeMigrationBackup(root, path, data)
+	if err != nil {
+		t.Fatalf("writeMigrationBackup: %v", err)
+	}
+	wantPrefix := filepath.Join(root, migrationStateDir, "backups", "candy", "widget", "charly.yml") + "."
+	if !strings.HasPrefix(backup, wantPrefix) {
+		t.Errorf("backup %q is not under %q", backup, wantPrefix)
+	}
+	got, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("reading backup: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("backup content mismatch:\n got %q\nwant %q", got, data)
+	}
+
+	gi, err := os.ReadFile(filepath.Join(root, migrationStateDir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("reading .charly/.gitignore: %v", err)
+	}
+	if string(gi) != migrationGitignore {
+		t.Errorf(".charly/.gitignore = %q, want %q", gi, migrationGitignore)
+	}
+
+	// No adjacent `.bak` beside the protected file.
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".bak") {
+			t.Errorf("adjacent backup left beside the file: %s", e.Name())
+		}
+	}
+}
+
+// TestWriteMigrationBackup_IdempotentGitignore: a second call reuses the existing
+// `.charly/.gitignore` verbatim and still keys a fresh (distinct) backup.
+func TestWriteMigrationBackup_IdempotentGitignore(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "charly.yml")
+	if err := os.WriteFile(path, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := writeMigrationBackup(root, path, []byte("x\n"))
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	second, err := writeMigrationBackup(root, path, []byte("y\n"))
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if first == second {
+		t.Errorf("two backups collided at the same path: %q", first)
+	}
+	gi, _ := os.ReadFile(filepath.Join(root, migrationStateDir, ".gitignore"))
+	if string(gi) != migrationGitignore {
+		t.Errorf(".gitignore = %q, want %q", gi, migrationGitignore)
+	}
+}
+
+// TestWriteMigrationBackup_OutsideRootStaysInside: a path NOT under root (the
+// per-host overlay at ~/.config/charly/charly.yml) is re-keyed under a synthetic
+// `external/` prefix so it can never escape the backup tree via `..`.
+func TestWriteMigrationBackup_OutsideRootStaysInside(t *testing.T) {
+	root := t.TempDir()
+	external := filepath.Join(t.TempDir(), "config", "charly.yml")
+	if err := os.MkdirAll(filepath.Dir(external), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(external, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := writeMigrationBackup(root, external, []byte("x\n"))
+	if err != nil {
+		t.Fatalf("writeMigrationBackup: %v", err)
+	}
+	backupRoot := filepath.Join(root, migrationStateDir, "backups")
+	rel, err := filepath.Rel(backupRoot, backup)
+	if err != nil {
+		t.Fatalf("rel: %v", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Errorf("external backup escaped the backup root: %q", backup)
+	}
+	if !strings.HasPrefix(rel, "external"+string(filepath.Separator)) {
+		t.Errorf("external backup not re-keyed under external/: %q", backup)
+	}
+}
+
+// TestRunMigrations_BackupGitignored is the end-to-end proof: migrate a fixture
+// with a `version:` key and assert (a) the file is rewritten, (b) NO adjacent
+// `<file>.bak.<ts>` exists, (c) a backup exists under <root>/.charly/backups/,
+// (d) <root>/.charly/.gitignore contains `*`, (e) after `git init` + `git add -A`
+// `git status --porcelain` shows NOTHING under the `.charly/` tree, and the backup
+// path is printed for rollback discoverability.
+func TestRunMigrations_BackupGitignored(t *testing.T) {
+	dir := t.TempDir()
+	body := "" +
+		"version: 2026.248.1030\n" +
+		"discover: []\n" +
+		"mycandy:\n" +
+		"  candy:\n" +
+		"    version: 2026.186.0100\n" +
+		"    description: d\n"
+	root := filepath.Join(dir, "charly.yml")
+	if err := os.WriteFile(root, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	changed, err := runMigrations(&MigrateContext{Dir: dir, Out: &out}, false)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+
+	// (a) the migrated file is rewritten (both the top-level and the entity stamp
+	// are gone) while unrelated content survives.
+	if !changed {
+		t.Fatalf("expected a rewrite; output: %q", out.String())
+	}
+	after, err := os.ReadFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(after), "version:") {
+		t.Errorf("a version: key survived:\n%s", after)
+	}
+	if !strings.Contains(string(after), "description: d") || !strings.Contains(string(after), "discover: []") {
+		t.Errorf("unrelated fields damaged:\n%s", after)
+	}
+
+	// (b) NO `<file>.bak.<ts>` adjacent to any migrated file.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".bak") {
+			t.Errorf("adjacent rollback artifact in the project root: %s", e.Name())
+		}
+	}
+
+	// (c) at least one backup landed under <root>/.charly/backups/, carrying the
+	// original content (discoverable rollback).
+	backups := globBackups(t, filepath.Join(dir, migrationStateDir, "backups"))
+	if len(backups) == 0 {
+		t.Fatal("no backup written under .charly/backups/")
+	}
+	foundRoot, foundOriginal := false, false
+	for _, b := range backups {
+		rel, _ := filepath.Rel(filepath.Join(dir, migrationStateDir, "backups"), b)
+		if strings.HasPrefix(rel, "charly.yml") {
+			foundRoot = true
+			got, _ := os.ReadFile(b)
+			if strings.Contains(string(got), "version: 2026.248.1030") {
+				foundOriginal = true
+			}
+		}
+	}
+	if !foundRoot {
+		t.Errorf("no backup for the root charly.yml under .charly/backups/; got %v", backups)
+	}
+	if !foundOriginal {
+		t.Errorf("no root backup carries the pre-migration content (version: 2026.248.1030); got %v", backups)
+	}
+
+	// (e-discoverability) the backup path is printed.
+	if !strings.Contains(out.String(), "backup: ") {
+		t.Errorf("backup path not printed for rollback discoverability; output: %q", out.String())
+	}
+
+	// (d) <root>/.charly/.gitignore contains `*`.
+	giPath := filepath.Join(dir, migrationStateDir, ".gitignore")
+	gi, err := os.ReadFile(giPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", giPath, err)
+	}
+	if !strings.Contains(string(gi), "*") {
+		t.Errorf(".charly/.gitignore does not contain `*`: %q", gi)
+	}
+
+	// (e) after `git init` + `git add -A`, `git status --porcelain` shows NOTHING
+	// for the `.charly/` tree — the backups are ignored with NO per-repo .gitignore.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	git(t, dir, "init", "-q")
+	git(t, dir, "add", "-A")
+	porcelain := git(t, dir, "status", "--porcelain")
+	for _, line := range strings.Split(strings.TrimRight(porcelain, "\n"), "\n") {
+		if strings.Contains(line, migrationStateDir) {
+			t.Errorf("git status shows the .charly/ tree: %q\nfull porcelain:\n%s", line, porcelain)
+		}
+	}
+}
+
+// TestRunMigrations_OverlayBackupGitignored: a full-mode migrate (which also
+// rewrites the per-host overlay, a file that lives OUTSIDE the project root)
+// writes the overlay's rollback copy under <root>/.charly/backups/external/, not
+// adjacent to the overlay — still inside the one gitignored tree.
+func TestRunMigrations_OverlayBackupGitignored(t *testing.T) {
+	dir := writeRoot(t)
+	overlayDir := t.TempDir()
+	overlay := filepath.Join(overlayDir, "charly.yml")
+	if err := os.WriteFile(overlay, []byte("version: 2026.248.1030\ngithubrunner:\n    pod:\n        image: x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	changed, err := runMigrations(&MigrateContext{Dir: dir, HostDeployPath: overlay, Out: &out}, false)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected the overlay stamp to be stripped; output: %q", out.String())
+	}
+
+	// No adjacent `<overlay>.bak.<ts>` in the overlay's own directory.
+	entries, err := os.ReadDir(overlayDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".bak") {
+			t.Errorf("adjacent rollback artifact beside the overlay: %s", e.Name())
+		}
+	}
+
+	backups := globBackups(t, filepath.Join(dir, migrationStateDir, "backups"))
+	found := false
+	for _, b := range backups {
+		rel, _ := filepath.Rel(filepath.Join(dir, migrationStateDir, "backups"), b)
+		if strings.HasPrefix(rel, "external"+string(filepath.Separator)) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("overlay backup not written under .charly/backups/external/; got %v", backups)
+	}
+}
+
+// globBackups returns every regular file under root (recursively), sorted.
+func globBackups(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			out = append(out, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// git runs a git command in dir and returns its stdout, failing on error.
+func git(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git %s: %v\nstderr: %s", strings.Join(args, " "), err, stderr.String())
+	}
+	return stdout.String()
 }
