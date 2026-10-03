@@ -11,8 +11,10 @@ import (
 // reshape_pipeline_lobster.go — the legacy `kind: pipeline` grammar cutover: rewrite the
 // RETIRED stage grammar (`stages:` / `kind:` / `command:` / `skip_when:` / `@stage.output`
 // refs) into the NEW lobster-syntax grammar (`steps:` / verb sugar / `run:` / `when:` /
-// `$id.json.path` refs), plus the required `description:`, the `config:` consolidation, and
-// the `args:` declaration the new schema requires.
+// `$id.json.path` refs), plus the required `description:`, the `config:` consolidation, the
+// `args:` declaration the new schema requires, and the duplication of the entity-level knobs
+// each lifted verb reads into that verb's own body (reshapePipelineVerbKnobs) so the lifted
+// verb is self-contained.
 //
 // WHY A RESHAPER HOOK, NOT THE DECLARATIVE OPS. None of the four generic ops can express
 // this step:
@@ -23,7 +25,10 @@ import (
 //   - they cannot REWRITE string scalars (`@id.out` ⇒ `$id.json.out`, `$pr` ⇒ `${pr}`,
 //     `$env.N` ⇒ `${env.N}`) uniformly across every string in the entity;
 //   - they cannot ADD a required key (`description:`) nor CONSOLIDATE scattered top-level
-//     keys into one `config:` mapping.
+//     keys into one `config:` mapping;
+//   - they cannot COPY an entity-level value INTO each lifted verb body — the self-containment
+//     rule (a lifted verb must not depend on a pipeline config it may never be given) needs
+//     every stage of a kind to receive its own copy of that knob.
 // So the cutover registers one goHooks entry, exactly like compactNodeForm.
 //
 // The vocabulary below is a FROZEN snapshot of the pre-cutover pipeline grammar. A
@@ -40,6 +45,71 @@ import (
 // `plan: [{<kind>: {…}}]` verb-sugar step. `command` is NOT here: it becomes a `run:` step
 // (and `run:` is not an object-verb form).
 var reshapePipelineVerbKinds = setOfWords("agent", "probe", "ade", "generate", "emit", "media", "gate")
+
+// reshapePipelineVerbKnobs is the table of ENTITY-LEVEL (`pipeline:`-level) knobs whose value
+// each lifted verb body must carry a COPY of, so the lifted verb is SELF-CONTAINED. Today
+// these verb bodies read their knob off the RUN CONTEXT — the pipeline's own config — e.g.
+// `rc.skills` in the agent verb, `rc.media` in the probe/media verbs, `rc.report` in the
+// generate/emit verbs. After the cutover the SAME verb is an ordinary provider reachable from
+// ANY plan, including a plain `charly task` plan that has no pipeline config at all, and the
+// knob would simply vanish. The migrator is the one place that knows both the old entity-level
+// value and the stage being lifted, so the migrator is where the duplication happens.
+//
+//	agent    → reads rc.skills / rc.llm / rc.repo
+//	probe    → reads rc.media
+//	media    → reads rc.media
+//	generate → reads rc.report
+//	emit     → reads rc.report
+//
+// `ade` and `gate` are ABSENT ON PURPOSE — that absence is a FINDING, not an oversight: no
+// entity-level knob has a reader in either body (the ade verb contains zero `rc.` reads; the
+// gate verb reads only `condition`). Copying one would fabricate a key the verb never
+// consults. `pr`, `calver`, `workdir`, `env` and `ledger` are ENGINE/run-scoped, never config
+// knobs, and are never copied here.
+//
+// The key SPELLINGS are frozen — they must match the lifted verb defs exactly
+// (`skills?: {corpus: string}`, `llm?: #LLMSpec`, `repo?: string`, `media?: #MediaSpec`,
+// `report?: #ReportSpec`), because the value is copied VERBATIM under the SAME name. The list
+// order below is the emitted order and is pinned by the tests, so keep it as written.
+var reshapePipelineVerbKnobs = map[string][]string{
+	"agent":    {"skills", "llm", "repo"},
+	"probe":    {"media"},
+	"media":    {"media"},
+	"generate": {"report"},
+	"emit":     {"report"},
+}
+
+// reshapePipelineKnobNames is the UNION of the table above, derived from it (never a second
+// hand-kept list) so the collection pass in reshapePipelineBody and the table can never drift.
+var reshapePipelineKnobNames = func() map[string]bool {
+	names := map[string]bool{}
+	for _, knobs := range reshapePipelineVerbKnobs {
+		for _, name := range knobs {
+			names[name] = true
+		}
+	}
+	return names
+}()
+
+// reshapePipelineCloneNode deep-copies a node. The SAME *yaml.Node must never appear twice in
+// one tree: yaml.v3 would emit it twice and any later mutation of one occurrence would alias
+// into the other. Comments (Head/Line/Foot) are deliberately NOT copied — the original keeps
+// them, and duplicating a comment block into every lifted verb body is noise. Anchor/Alias are
+// deliberately dropped too: re-emitting one anchor name at several sites would define it more
+// than once, which is worse than losing it. Nil-safe.
+func reshapePipelineCloneNode(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	c := &yaml.Node{Kind: n.Kind, Style: n.Style, Tag: n.Tag, Value: n.Value}
+	if len(n.Content) > 0 {
+		c.Content = make([]*yaml.Node, len(n.Content))
+		for i, child := range n.Content {
+			c.Content[i] = reshapePipelineCloneNode(child)
+		}
+	}
+	return c
+}
 
 // reshapePipelinePassThroughKeys are the top-level pipeline keys that are ALREADY valid in
 // the new grammar and pass through untouched. `stages:` is handled explicitly (it is
@@ -140,9 +210,25 @@ func reshapePipelineBody(name string, b *yaml.Node) bool {
 		}
 	}
 
+	// 1b. Collect the ENTITY-LEVEL knob values the lifted verb bodies must carry a copy of
+	//     (reshapePipelineVerbKnobs). This MUST run before anything mutates `b`: the config
+	//     consolidation below rebuilds b.Content, which would otherwise move these nodes out
+	//     from under the lookup. Only the POINTER is kept here; reshapePipelineVerbStage
+	//     clones at the use site, so the original (still routed into `config:`) is untouched.
+	knobs := map[string]*yaml.Node{}
+	for i := 0; i+1 < len(b.Content); i += 2 {
+		k, v := b.Content[i], b.Content[i+1]
+		if !reshapePipelineKnobNames[k.Value] {
+			continue
+		}
+		if _, seen := knobs[k.Value]; !seen {
+			knobs[k.Value] = v
+		}
+	}
+
 	// 2. Reshape every stage element (the key is renamed to `steps:` below).
 	for i, st := range stagesSeq.Content {
-		stagesSeq.Content[i] = reshapePipelineStage(name, st)
+		stagesSeq.Content[i] = reshapePipelineStage(name, st, knobs)
 	}
 
 	// 3. Rebuild the body's top-level keys: the added `description:` first, then the
@@ -209,7 +295,9 @@ func reshapePipelineBody(name string, b *yaml.Node) bool {
 }
 
 // reshapePipelineStage rewrites ONE legacy stage mapping into its new-grammar step mapping.
-func reshapePipelineStage(name string, st *yaml.Node) *yaml.Node {
+// `knobs` carries the entity-level values a lifted verb body must duplicate; the command
+// path ignores them (a `run:` step has no verb input).
+func reshapePipelineStage(name string, st *yaml.Node, knobs map[string]*yaml.Node) *yaml.Node {
 	if st.Kind != yaml.MappingNode {
 		panic(fmt.Sprintf("reshape-pipeline-lobster: pipeline %q: every `stages:` entry must be a mapping", name))
 	}
@@ -223,7 +311,7 @@ func reshapePipelineStage(name string, st *yaml.Node) *yaml.Node {
 	case kindNode.Value == "command":
 		return reshapePipelineCommandStage(name, st)
 	case reshapePipelineVerbKinds[kindNode.Value]:
-		return reshapePipelineVerbStage(name, st, kindNode.Value)
+		return reshapePipelineVerbStage(name, st, kindNode.Value, knobs)
 	default:
 		panic(fmt.Sprintf(
 			"reshape-pipeline-lobster: pipeline %q stage %s: unknown `kind: %s` — cannot migrate. The old grammar's kinds are command|agent|probe|ade|generate|emit|media|gate.",
@@ -295,7 +383,9 @@ func reshapePipelineCommandStage(name string, st *yaml.Node) *yaml.Node {
 // including `redo`, `escalate_after`, `triggers`, `outputs`, `cache`, … Nothing is dropped.
 // Comments ride along: surviving keys are the original nodes (renamed in place for
 // `skip_when`→`when`), and a dropped `kind:` key's comment moves onto the step's first key.
-func reshapePipelineVerbStage(name string, st *yaml.Node, kind string) *yaml.Node {
+// The entity-level knobs this verb reads (reshapePipelineVerbKnobs) are then copied IN, so the
+// lifted verb is self-contained; a knob the stage already declared wins and is never clobbered.
+func reshapePipelineVerbStage(name string, st *yaml.Node, kind string, knobs map[string]*yaml.Node) *yaml.Node {
 	var idKey, idVal, skipKey, skipVal, kindKey *yaml.Node
 	verb := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	for i := 0; i+1 < len(st.Content); i += 2 {
@@ -311,6 +401,22 @@ func reshapePipelineVerbStage(name string, st *yaml.Node, kind string) *yaml.Nod
 		default:
 			verb.Content = append(verb.Content, k, v)
 		}
+	}
+	// Duplicate the entity-level knobs this verb reads off the run context (see
+	// reshapePipelineVerbKnobs), so the lifted verb stays self-contained on a plan that has no
+	// pipeline config. The guard is the whole precedence rule: a value the stage ALREADY
+	// declared was emitted into verb.Content by the loop above, so it always WINS and is never
+	// clobbered — the entity value only fills a gap. Cloned (never the same pointer twice):
+	// the original node is still routed into `config:`.
+	for _, knob := range reshapePipelineVerbKnobs[kind] {
+		if reshapeMapValue(verb, knob) != nil {
+			continue
+		}
+		val, ok := knobs[knob]
+		if !ok || val == nil {
+			continue
+		}
+		verb.Content = append(verb.Content, reshapePipelineScalarKey(knob), reshapePipelineCloneNode(val))
 	}
 	planElem := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
 		reshapePipelineScalarKey(kind), verb,

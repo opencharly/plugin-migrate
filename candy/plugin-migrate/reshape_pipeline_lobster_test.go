@@ -5,9 +5,50 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+// pipelineGithubRefRe extracts a whole `@github.com/<owner>/<repo>/<path>:<tag>` candy ref.
+var pipelineGithubRefRe = regexp.MustCompile(`@github\.com/[^ '"` + "`" + `\n]+`)
+
+// pipelineDistinctGithubRefs returns the SET of distinct github candy refs in a document.
+// A count assertion is the wrong shape here: the migrator now DUPLICATES entity-level knob
+// values into lifted verb bodies, so a `report:` block carrying a github ref legitimately
+// appears several times in the output. What must hold is that the SET is unchanged and that
+// no ref was rewritten into a stage ref (`$github…`) — never that a total is a fixed number.
+func pipelineDistinctGithubRefs(s string) map[string]bool {
+	refs := map[string]bool{}
+	for _, m := range pipelineGithubRefRe.FindAllString(s, -1) {
+		refs[m] = true
+	}
+	return refs
+}
+
+// pipelineAssertGithubRefsPreserved asserts the migrated document preserves every distinct
+// github candy ref from src byte-identically, and invented none.
+func pipelineAssertGithubRefsPreserved(t *testing.T, src, out string) {
+	t.Helper()
+	want := pipelineDistinctGithubRefs(src)
+	got := pipelineDistinctGithubRefs(out)
+	for ref := range want {
+		if !got[ref] {
+			t.Errorf("github candy ref %q was lost or rewritten by the migration", ref)
+		}
+	}
+	for ref := range got {
+		if !want[ref] {
+			t.Errorf("migration invented a github candy ref %q", ref)
+		}
+	}
+	if strings.Contains(out, "$github") {
+		t.Error("a github candy ref was rewritten into a stage ref ($github…)")
+	}
+}
 
 // reshape_pipeline_lobster_test.go — the legacy `kind: pipeline` grammar → lobster-syntax
 // cutover. The compact fixture below exercises EVERY mapping row and every hazard:
@@ -26,11 +67,19 @@ import (
 //   - `$report.bed_template` survives even though `report` IS a declared stage id (the
 //     hazard a naive `[@$]<id>\.` regex would corrupt)
 //   - `args:` auto-declared for `pr`
+//   - the entity-level knobs DUPLICATED into each lifted verb body, so the verb is
+//     self-contained on a plan with no pipeline config (`skills`/`llm`/`repo` for agent,
+//     `media` for probe/media, `report` for generate/emit; `ade`/`gate` get NONE — they have
+//     no reader), with a stage-local value always winning over the entity value
 //   - the two HARD-ERROR paths (unknown `kind:`, `kind: command` with an extra field)
 //   - idempotency (a second apply reports NO change)
 const pipelineLobsterFixture = `demo-pipeline:
     pipeline:
         repo: acme/widget
+        skills:
+            corpus: eval-skills
+        llm:
+            model: eval-model
         concurrency: {lanes: 16}
         media:
             dir: "eval/pr-$pr/media"
@@ -78,6 +127,17 @@ const pipelineLobsterFixture = `demo-pipeline:
               schema: eval-report
               value: {pr: "$pr", cls: "@oracle.golden"}
               out: "$report.bed_template"
+            - id: capture
+              kind: media
+              files: [cast, png]
+              transcode: mjpeg:mp4
+            - id: audit
+              kind: ade
+              validate: |
+                the chart is populated
+            - id: publish
+              kind: gate
+              condition: "$env.PUBLISH == approve"
 `
 
 func pipelineLobsterMigrate(t *testing.T, in string) string {
@@ -115,9 +175,7 @@ func TestPipelineLobsterGithubRefsByteIdentical(t *testing.T) {
 	if !strings.Contains(out, "@github.com/acme/candy:v1") {
 		t.Errorf("github candy ref in report.template missing:\n%s", out)
 	}
-	if c := strings.Count(out, "@github.com"); c != 2 {
-		t.Errorf("expected 2 @github.com refs preserved, got %d:\n%s", c, out)
-	}
+	pipelineAssertGithubRefsPreserved(t, pipelineLobsterFixture, out)
 }
 
 // TestPipelineLobsterGrammarRewrite — every mapping row, asserted as properties.
@@ -351,8 +409,11 @@ func TestPipelineLobsterRealFixture(t *testing.T) {
 			t.Errorf("shell var %q must survive untouched", shell)
 		}
 	}
-	if c := strings.Count(out, "@github.com/opencharly/"); c != 3 {
-		t.Errorf("expected 3 @github.com/opencharly candy refs preserved, got %d", c)
+	pipelineAssertGithubRefsPreserved(t, string(data), out)
+	// Every lifted verb body carries a copy of the entity-level knobs its verb reads, so the
+	// migrated entity stays self-contained on a plan that has no pipeline `config:`.
+	if n := assertVerbKnobsSelfContained(t, out); n == 0 {
+		t.Error("no verb-sugar steps found in the migrated real fixture")
 	}
 	// Second run is a no-op.
 	changed2, err := runMigrations(&MigrateContext{Dir: dir, Out: io.Discard}, true)
@@ -362,6 +423,232 @@ func TestPipelineLobsterRealFixture(t *testing.T) {
 	if changed2 {
 		t.Error("second run reported a change — the real fixture is not idempotent")
 	}
+}
+
+// assertVerbKnobsSelfContained walks a MIGRATED document and asserts, for every verb-sugar
+// step, that the verb body carries a COPY of every entity-level knob that verb reads
+// (reshapePipelineVerbKnobs) whenever the entity declared it. The table IS the oracle, so the
+// test and the migrator cannot drift. It returns the number of verb bodies it checked.
+//
+// The assertion is one-directional on purpose: a body MAY legitimately carry a key the STAGE
+// itself declared even when the table has no row for that kind (the real eval-omarchy ade
+// stages declare their own `repo:`), and this walk cannot tell an authored key from a copied
+// one. That the no-reader kinds receive NOTHING is proved separately, on a fixture whose
+// stages declare no knobs (TestPipelineLobsterAdeGateBodiesUnchanged).
+func assertVerbKnobsSelfContained(t *testing.T, doc string) int {
+	t.Helper()
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(doc), &root); err != nil {
+		t.Fatalf("unmarshal migrated document: %v", err)
+	}
+	verbs := 0
+	for name, rawEntity := range root {
+		entity, ok := rawEntity.(map[string]any)
+		if !ok {
+			continue
+		}
+		pl, ok := entity["pipeline"].(map[string]any)
+		if !ok {
+			continue
+		}
+		// The entity's knob values now live under the consolidated `config:` map.
+		declared := map[string]bool{}
+		if cfg, ok := pl["config"].(map[string]any); ok {
+			for knob := range reshapePipelineKnobNames {
+				if _, ok := cfg[knob]; ok {
+					declared[knob] = true
+				}
+			}
+		}
+		steps, _ := pl["steps"].([]any)
+		for _, rawStep := range steps {
+			step, ok := rawStep.(map[string]any)
+			if !ok {
+				continue
+			}
+			plan, _ := step["plan"].([]any)
+			if len(plan) != 1 {
+				continue // a `run:` step has no verb body
+			}
+			elem, ok := plan[0].(map[string]any)
+			if !ok || len(elem) != 1 {
+				t.Errorf("%s: step %v: plan element must carry exactly one verb, got %v", name, step["id"], plan[0])
+				continue
+			}
+			for kind, rawBody := range elem {
+				body, ok := rawBody.(map[string]any)
+				if !ok {
+					t.Errorf("%s: step %v: verb %q body is not a mapping", name, step["id"], kind)
+					continue
+				}
+				verbs++
+				for _, knob := range reshapePipelineVerbKnobs[kind] {
+					if !declared[knob] {
+						continue // the entity declared no value — nothing to copy
+					}
+					if _, ok := body[knob]; !ok {
+						t.Errorf("%s: step %v (%s): verb body is missing the entity-level knob %q, so the lifted verb is NOT self-contained",
+							name, step["id"], kind, knob)
+					}
+				}
+			}
+		}
+	}
+	return verbs
+}
+
+// pipelineVerbBody returns the verb body of `stepID` in `entity` from a migrated document.
+func pipelineVerbBody(t *testing.T, doc, entity, stepID string) (string, map[string]any) {
+	t.Helper()
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(doc), &root); err != nil {
+		t.Fatalf("unmarshal migrated document: %v", err)
+	}
+	ent, ok := root[entity].(map[string]any)
+	if !ok {
+		t.Fatalf("entity %q not found", entity)
+	}
+	pl, _ := ent["pipeline"].(map[string]any)
+	steps, _ := pl["steps"].([]any)
+	for _, rawStep := range steps {
+		step, _ := rawStep.(map[string]any)
+		if step["id"] != stepID {
+			continue
+		}
+		plan, _ := step["plan"].([]any)
+		if len(plan) != 1 {
+			t.Fatalf("step %q is not a verb-sugar step", stepID)
+		}
+		for kind, rawBody := range plan[0].(map[string]any) {
+			body, _ := rawBody.(map[string]any)
+			return kind, body
+		}
+	}
+	t.Fatalf("step %q not found in entity %q", stepID, entity)
+	return "", nil
+}
+
+// TestPipelineLobsterVerbKnobsDuplicated — the compact fixture exercises EVERY kind (all five
+// table rows plus the two no-reader kinds), and each lifted verb body carries a copy of the
+// entity-level knobs its verb reads.
+func TestPipelineLobsterVerbKnobsDuplicated(t *testing.T) {
+	out := pipelineLobsterMigrate(t, pipelineLobsterFixture)
+	if n := assertVerbKnobsSelfContained(t, out); n == 0 {
+		t.Fatal("no verb-sugar steps found")
+	}
+	// Coverage guard: this fixture must exercise every kind the table names, and both kinds
+	// it deliberately leaves out — otherwise the test silently stops proving the table.
+	seen := map[string]bool{}
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(out), &root); err != nil {
+		t.Fatal(err)
+	}
+	pl := root["demo-pipeline"].(map[string]any)["pipeline"].(map[string]any)
+	for _, rawStep := range pl["steps"].([]any) {
+		plan, _ := rawStep.(map[string]any)["plan"].([]any)
+		if len(plan) == 1 {
+			for kind := range plan[0].(map[string]any) {
+				seen[kind] = true
+			}
+		}
+	}
+	for kind := range reshapePipelineVerbKnobs {
+		if !seen[kind] {
+			t.Errorf("fixture does not exercise verb kind %q from the knob table", kind)
+		}
+	}
+	for _, kind := range []string{"ade", "gate"} {
+		if !seen[kind] {
+			t.Errorf("fixture does not exercise the no-reader kind %q", kind)
+		}
+	}
+}
+
+// TestPipelineLobsterVerbKnobStageLocalWins — the precedence rule, both directions: a stage
+// that ALREADY declared a knob keeps its OWN value (never clobbered by the entity's), and a
+// stage that did not gets the entity's value.
+func TestPipelineLobsterVerbKnobStageLocalWins(t *testing.T) {
+	out := pipelineLobsterMigrate(t, `local-override:
+    pipeline:
+        repo: acme/widget
+        media:
+            dir: "entity-dir"
+            min: {png: 1}
+        stages:
+            - id: local
+              kind: probe
+              verbs: [ledger_gate]
+              media:
+                dir: "stage-dir"
+            - id: gap
+              kind: probe
+              verbs: [ledger_gate]
+`)
+	// The entity value survives untouched under `config:` (the duplication is purely additive).
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(out), &root); err != nil {
+		t.Fatal(err)
+	}
+	cfg := root["local-override"].(map[string]any)["pipeline"].(map[string]any)["config"].(map[string]any)
+	if dir := cfg["media"].(map[string]any)["dir"]; dir != "entity-dir" {
+		t.Errorf("config.media.dir = %v, want entity-dir", dir)
+	}
+	// The stage-local value WINS: an appended entity copy would make the later key win instead.
+	_, local := pipelineVerbBody(t, out, "local-override", "local")
+	if got := local["media"].(map[string]any)["dir"]; got != "stage-dir" {
+		t.Errorf("stage-local media was clobbered by the entity value: media.dir = %v, want stage-dir", got)
+	}
+	// The gap is filled from the entity.
+	_, gap := pipelineVerbBody(t, out, "local-override", "gap")
+	if got := gap["media"].(map[string]any)["dir"]; got != "entity-dir" {
+		t.Errorf("the entity value did not fill the gap: media.dir = %v, want entity-dir", got)
+	}
+}
+
+// TestPipelineLobsterAdeGateBodiesUnchanged — `ade` and `gate` have NO entity-level knob
+// reader, so their lifted verb bodies must carry exactly their own stage fields and nothing
+// added. This is the "the absence is the finding" proof, on a fixture whose ade/gate stages
+// declare no knob of their own.
+func TestPipelineLobsterAdeGateBodiesUnchanged(t *testing.T) {
+	out := pipelineLobsterMigrate(t, pipelineLobsterFixture)
+	for _, tc := range []struct {
+		stepID string
+		kind   string
+		own    []string
+	}{
+		{"audit", "ade", []string{"validate"}},
+		{"publish", "gate", []string{"condition"}},
+	} {
+		kind, body := pipelineVerbBody(t, out, "demo-pipeline", tc.stepID)
+		if kind != tc.kind {
+			t.Errorf("step %q: verb kind = %q, want %q", tc.stepID, kind, tc.kind)
+		}
+		if len(body) != len(tc.own) {
+			t.Errorf("step %q (%s): body carries %d keys, want only its own %v — got %v",
+				tc.stepID, tc.kind, len(body), tc.own, sortedKeys(body))
+		}
+		for _, k := range tc.own {
+			if _, ok := body[k]; !ok {
+				t.Errorf("step %q (%s): own field %q missing", tc.stepID, tc.kind, k)
+			}
+		}
+		for _, knob := range []string{"skills", "llm", "repo", "media", "report"} {
+			if _, ok := body[knob]; ok {
+				t.Errorf("step %q (%s): entity-level knob %q was copied although the verb has no reader for it",
+					tc.stepID, tc.kind, knob)
+			}
+		}
+	}
+}
+
+// sortedKeys renders a mapping's keys for a failure message.
+func sortedKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestPipelineLobsterRunMigrationsChain — the FULL engine chain (every table step in

@@ -162,6 +162,10 @@ migrations: [
 		// `skip_when: X` → `when: !(X)`, the required `description:` is added, every
 		// top-level knob (`repo`/`skills`/`media`/`report`/…) consolidates into
 		// `config:` (with `concurrency: {lanes: N}` flattened to `config: {lanes: N}`),
+		// each lifted verb body receives a COPY of every entity-level knob that verb
+		// reads (agent: skills/llm/repo, probe+media: media, generate+emit: report;
+		// ade/gate read none), so the lifted verb stays self-contained on a plan with
+		// no pipeline config — a stage-local value always wins over the entity's,
 		// `args:` declares `pr` when `$pr` is referenced, and every ref is rewritten
 		// (`$pr`→`${pr}`, `$env.N`→`${env.N}`, `@id.out`→`$id.json.out`; `@github`
 		// candy refs left byte-identical). The body is reshaped ONLY when it still
