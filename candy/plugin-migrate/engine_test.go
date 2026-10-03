@@ -267,6 +267,40 @@ func TestRunMigrations_StripsVersionStamp(t *testing.T) {
 	}
 }
 
+// TestRunMigrations_LeavesNonManifestVersionAlone: plugin-migrate#16 — the candidate
+// sweep covers EVERY root-level *.yml/*.yaml sibling, so the top-level-stamp strip must
+// be gated on the charly MANIFEST name. A non-manifest YAML whose `version:` belongs to
+// a DIFFERENT tool (.golangci.yml's `version: "2"` is golangci-lint's config version)
+// must survive untouched — the top-level `version:` is a charly schema stamp ONLY in a
+// charly.yml.
+func TestRunMigrations_LeavesNonManifestVersionAlone(t *testing.T) {
+	dir := t.TempDir()
+	// A root-level non-manifest YAML sibling carrying a foreign `version:`.
+	golangci := "version: \"2\"\n\nrun:\n  timeout: 10m\nlinters:\n  enable:\n    - gofmt\n"
+	foreign := filepath.Join(dir, ".golangci.yml")
+	if err := os.WriteFile(foreign, []byte(golangci), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A real charly manifest in the same dir, so the sweep actually runs the step.
+	root := filepath.Join(dir, "charly.yml")
+	if err := os.WriteFile(root, []byte("version: 2026.248.1030\ndiscover: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := runMigrations(&MigrateContext{Dir: dir, Out: &out}, false); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	after, _ := os.ReadFile(foreign)
+	if !bytes.Equal(after, []byte(golangci)) {
+		t.Errorf("non-manifest .golangci.yml was modified (plugin-migrate#16):\n%s", after)
+	}
+	// And the real manifest's stamp WAS stripped (the step still does its job).
+	rootAfter, _ := os.ReadFile(root)
+	if strings.Contains(string(rootAfter), "version:") {
+		t.Errorf("charly.yml stamp survived:\n%s", rootAfter)
+	}
+}
+
 // TestRunMigrations_Idempotent: running the engine twice is a no-op — the second
 // run changes nothing and reports "nothing to migrate". This is the proof that
 // `charly migrate` is idempotent.

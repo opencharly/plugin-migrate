@@ -551,11 +551,23 @@ func writeMigrationBackup(root, path string, data []byte) (string, error) {
 	return backup, nil
 }
 
-// stripVersionField DELETES the first top-level `version:` line of one file. Returns
-// (changed, err); changed is false when the file is absent or has no top-level
-// `version:` key. A rollback copy is written to the gitignored <root>/.charly/backups/
-// tree (never adjacent) before any rewrite, and its path is printed to out.
+// stripVersionField DELETES the first top-level `version:` line of one AUTHORED
+// charly manifest (spec.UnifiedFileName). Returns (changed, err); changed is false
+// when the file is absent, is not a charly manifest, or has no top-level `version:`
+// key. A rollback copy is written to the gitignored <root>/.charly/backups/ tree
+// (never adjacent) before any rewrite, and its path is printed to out.
+//
+// The manifest-name guard is load-bearing: the top-level `version:` is a charly
+// SCHEMA stamp ONLY in a charly.yml. Every other candidate YAML a `version:` key
+// belongs to a DIFFERENT tool — `.golangci.yml`'s `version: "2"` is golangci-lint's
+// config-schema version. The candidate sweep (kit.OpUnifyCandidateFiles) covers
+// every root-level *.yml/*.yaml sibling, so without this guard `charly migrate`
+// silently deleted that key from unrelated tooling configs
+// (opencharly/plugin-migrate#16).
 func stripVersionField(root, path string, dryRun bool, out io.Writer) (bool, error) {
+	if filepath.Base(path) != spec.UnifiedFileName {
+		return false, nil // not an authored charly manifest — leave foreign keys alone
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
