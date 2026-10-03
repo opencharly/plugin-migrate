@@ -1,7 +1,7 @@
 # plugin-migrate
 
 The config-schema migration engine for OpenCharly — the `charly migrate` command
-that brings any project's `charly.yml` files to the latest schema CalVer.
+that brings any project's `charly.yml` files to the current schema.
 
 The plugin is a Go module at `candy/plugin-migrate/`, **compiled into** the
 charly binary (listed in `compiled_plugins:`) so `command:migrate` has a registry
