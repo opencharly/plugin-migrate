@@ -153,4 +153,20 @@ migrations: [
 		touches_host: true
 		apply:        "rekeyLegacyVMOverlay"
 	},
+	{
+		name: "pipeline-lobster-syntax"
+		// the legacy `kind: pipeline` STAGE grammar becomes the lobster-syntax step
+		// grammar: `stages:` → `steps:`, `kind: command` → a `run:` step (dropping
+		// the dead `expect_exit:`), every other kind → a `plan: [{<kind>: {…}}]`
+		// verb step (carrying every remaining field verbatim, incl. `redo:`),
+		// `skip_when: X` → `when: !(X)`, the required `description:` is added, every
+		// top-level knob (`repo`/`skills`/`media`/`report`/…) consolidates into
+		// `config:` (with `concurrency: {lanes: N}` flattened to `config: {lanes: N}`),
+		// `args:` declares `pr` when `$pr` is referenced, and every ref is rewritten
+		// (`$pr`→`${pr}`, `$env.N`→`${env.N}`, `@id.out`→`$id.json.out`; `@github`
+		// candy refs left byte-identical). The body is reshaped ONLY when it still
+		// carries `stages:`, so a second run is a no-op (idempotent). A pipeline
+		// entity is never authored on the per-host deploy overlay — no touches_host.
+		apply: "reshapePipelineLobster"
+	},
 ]

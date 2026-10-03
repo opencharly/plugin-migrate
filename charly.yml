@@ -27,7 +27,7 @@ check-migrate-local:
         disposable: true
         lifecycle: dev
         description: >-
-            Sole proof of the externalized config-schema MIGRATION ENGINE (candy/plugin-migrate, command:migrate — M15). A disposable kind:local deploy on host: local runs `charly migrate` host-side against mktemp fixtures: the host charly resolves command:migrate from the compiled-in registry and Invoke(OpRun) runs the engine in-proc, proving the engine relocation (the universal strip-version-stamp step, idempotency, --dry-run plumbing) end-to-end on a fresh rebuild; the declarative transform ops are covered by the plugin's engine_test.go units.
+            Sole proof of the externalized config-schema MIGRATION ENGINE (candy/plugin-migrate, command:migrate — M15). A disposable kind:local deploy on host: local runs `charly migrate` host-side against mktemp fixtures: the host charly resolves command:migrate from the compiled-in registry and Invoke(OpRun) runs the engine in-proc, proving the engine relocation (the universal strip-version-stamp step, idempotency, --dry-run plumbing) end-to-end on a fresh rebuild; the declarative transform ops are covered by the plugin's engine_test.go units. The last three steps prove the pipeline-lobster leg on the REAL eval-omarchy pipeline entities (testdata/eval-pr-plan.yml): stages→steps, kind:command→run:, skip_when→inverted when:, @stage.out→$stage.json.out, the added description:, the config:/args: consolidation — with @github candy refs and shell vars preserved byte-identical and a second run a no-op.
         plan:
             - check: charly migrate strips a retired top-level version stamp from a project AND its candy manifest (exit 0, "applied strip-version-stamp")
               id: migrate-strips-version-stamp
@@ -66,4 +66,32 @@ check-migrate-local:
                 - runtime
               command:
                 command: 'd=$(mktemp -d); printf "version: 2026.240.1943\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only --dry-run; rc=$?; grep -q "^version:" "$d/charly.yml" || rc=1; rm -rf "$d"; exit $rc'
+                in_container: false
+            - check: charly migrate rewrites the legacy kind-pipeline grammar into lobster steps syntax (stages→steps, kind-command→run, skip_when→inverted when, @stage.out→$stage.json.out), adds the required description, consolidates config, declares args pr, and leaves @github candy refs + shell vars byte-identical
+              id: migrate-pipeline-v1
+              exit_status: 0
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); cp candy/plugin-migrate/testdata/eval-pr-plan.yml "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; f="$d/charly.yml"; grep -vE "^[[:space:]]*#" "$f" | grep -qE "stages:|skip_when|kind:|expect_exit|@oracle|@gate|[$]env[.]|[$]pr|[$]calver" && rc=1; grep -qF "description: Migrated pipeline check-omarchy-accept-matrix." "$f" || rc=1; grep -qF "description: Migrated pipeline check-omarchy-accept-suite." "$f" || rc=1; grep -qF "description: Migrated pipeline eval-pr-plan." "$f" || rc=1; grep -qE "^[[:space:]]+steps:$" "$f" || rc=1; grep -qE "^[[:space:]]+- agent:$" "$f" || rc=1; grep -qE "^[[:space:]]+run: " "$f" || rc=1; grep -qF "lanes: 16" "$f" || rc=1; grep -qF "escalate_after: 5" "$f" || rc=1; grep -qE "[!][(][$]oracle[.]json[.]class ==" "$f" || rc=1; grep -qF "\${pr}" "$f" || rc=1; grep -qF "\${calver}" "$f" || rc=1; grep -qF "\$report.json.tests" "$f" || rc=1; grep -qF "\$report.bed_template" "$f" || rc=1; grep -vE "^[[:space:]]*#" "$f" | grep -qF "\$latest" || rc=1; grep -vE "^[[:space:]]*#" "$f" | grep -qF "\$b" || rc=1; test "$(grep -cF "@github.com/opencharly/" "$f")" = "3" || rc=1; rm -rf "$d"; exit $rc'
+                in_container: false
+            - check: a SECOND charly migrate on the already-migrated pipeline is a no-op (exit 0, "nothing to migrate") — the pipeline-lobster step is idempotent
+              id: migrate-pipeline-idempotent
+              exit_status: 0
+              stderr:
+                - contains: 'nothing to migrate'
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); cp candy/plugin-migrate/testdata/eval-pr-plan.yml "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only >/dev/null 2>&1; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
+                in_container: false
+            - check: charly migrate --dry-run reports the pipeline plan and leaves the legacy stages grammar untouched (exit 0, dry-run trailer, stages/skip_when still present)
+              id: migrate-pipeline-dry-run
+              exit_status: 0
+              stderr:
+                - contains: '(dry-run — no files were modified)'
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); cp candy/plugin-migrate/testdata/eval-pr-plan.yml "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only --dry-run; rc=$?; grep -q "stages:" "$d/charly.yml" || rc=1; grep -q "skip_when" "$d/charly.yml" || rc=1; grep -q "kind: command" "$d/charly.yml" || rc=1; rm -rf "$d"; exit $rc'
                 in_container: false

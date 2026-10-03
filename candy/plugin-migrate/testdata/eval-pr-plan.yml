@@ -1,0 +1,560 @@
+# The REAL legacy-grammar pipeline entity text, copied verbatim from
+# eval-omarchy/charly.yml (READ-ONLY source; it is another repo's submodule).
+# Held as test DATA — NOT a scanned candy manifest (scanRepoCandyDir reads only
+# direct candy/<name>/charly.yml manifests, and the migrate file walk skips
+# testdata/), so it never enters box validation or a repo-root migrate run.
+# The check-migrate-local bed copies this to a mktemp dir as charly.yml.
+
+check-omarchy-accept-matrix:
+    pipeline:
+        concurrency: {lanes: 16}
+        stages:
+            - id: bed
+              kind: command
+              command: 'charly check run check-omarchy-accept-$pr'
+              expect_exit: 0
+            - id: media
+              kind: command
+              # VERIFY-ONLY (the G-wave direct-write cutover): the bed's
+              # rec-wrap steps land artifacts DIRECTLY in
+              # media/<calver>/<bed>/, with no staging and no copy; this
+              # stage derives {bed} from the pipeline's $pr (the SAME short
+              # name bedShortName yields: check-omarchy-accept-<fn> → <fn>)
+              # and {calver} from the newest run dir, then delegates the
+              # whole 5-artifact min-size assertion to scripts/verify-media.sh
+              # — the ONE verify implementation (R3), shared by the matrix
+              # media stage and the suite aggregate stage alike.
+              command: 'latest=$(ls -t .check/check-omarchy-accept-$pr 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | head -1); [ -n "$latest" ] || exit 1; bash scripts/verify-media.sh $pr $latest'
+              expect_exit: 0
+
+check-omarchy-accept-suite:
+    pipeline:
+        stages:
+            - id: provision
+              kind: command
+              command: 'if ! charly vm snapshot list check-omarchy-eval-edge-inst 2>/dev/null | grep -q golden; then charly check run check-omarchy-eval-edge-inst; fi'
+              expect_exit: 0
+            - id: lock
+              kind: command
+              command: 'charly vm stop check-omarchy-eval-edge-inst 2>/dev/null || true'
+              expect_exit: 0
+            - id: matrix
+              kind: command
+              command: 'charly pipeline run check-omarchy-accept-matrix --prs session shell-surfaces menu-bar panels apps system security hyprland monitors network update plugins agents theme-media power-audio dev-migrations --lanes 16'
+              expect_exit: 0
+            # the SAME 5-artifact assertion, delegated to the ONE script (R3)
+            - id: aggregate
+              kind: command
+              command: 'for b in session shell-surfaces menu-bar panels apps system security hyprland monitors network update plugins agents theme-media power-audio dev-migrations; do latest=$(ls -t ".check/check-omarchy-accept-$b" 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | head -1); [ -n "$latest" ] || exit 1; bash scripts/verify-media.sh $b $latest; done'
+              expect_exit: 0
+            - id: report
+              kind: command
+              command: 'echo "# Omarchy acceptance matrix" > eval/omarchy-acceptance-matrix.md; for b in session shell-surfaces menu-bar panels apps system security hyprland monitors network update plugins agents theme-media power-audio dev-migrations; do latest=$(ls -t ".check/check-omarchy-accept-$b" 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | head -1); echo "- $b ($latest): $(ls media/$latest/$b/ 2>/dev/null | tr "\n" " ")" >> eval/omarchy-acceptance-matrix.md; done'
+              expect_exit: 0
+
+eval-pr-plan:
+  pipeline:
+    repo: omacom/omarchy
+    skills:
+      # the generated marketplace projection of candy/eval-pr/charly.yml's skill:
+      # entities (family distros). EVAL_UMBRELLA is the umbrella checkout.
+      corpus: "$env.EVAL_UMBRELLA/marketplace/distros/skills"
+    concurrency: { lanes: 16 }
+    media:
+      files: [cast, gif, mjpeg, mp4, png]
+      min: { cast: 200, gif: 1024, mjpeg: 4096, mp4: 512, png: 1024 }
+      dir: "eval/pr-$pr/media"
+    report:
+      # The user-voice RECORD body (a string leaf of the emitted record — NOT a
+      # YAML template). The `record` stage assembles the structured #EvalRecord
+      # value and this string is rendered with the per-marker grammar
+      # (${tests_body:indent}, ${suggestions:bullets}); the `emit` stage then
+      # marshals the WHOLE value through the CUE schema (candy/eval-pr/record.cue),
+      # so YAML quoting/block-scalars are the encoder's job — never hand-written.
+      template: |-
+        # I tested omacom/omarchy#$pr — here's what happened
+
+        ## Tests
+        ${tests_body:indent}
+
+        Recordings: terminal `media/pr-$pr.cast` · desktop `media/pr-$pr.mp4`
+        (`media/pr-$pr.png`, `media/pr-$pr.gif`).
+
+        ## Suggestions
+        ${suggestions:bullets}
+
+        *Assisted-by: charly eval-pr agent ollama/deepseek-v4.1-flash:cloud (analysed on a live system)*
+        *Tested-by: charly eval-pr (golden ${golden}, bed check-omarchy-pr-$pr-vm @ $calver)*
+
+      bed_template: |-
+        # GENERATED — eval/pr-$pr/charly.yml. Both beds: the treatment and the
+        # negative-control twin. Rendered from the eval-pr-plan template.
+        check-omarchy-pr-$pr-vm:
+          vm:
+            from: ${golden}
+            disposable: true
+            lifecycle: dev
+            update_gate: skip
+            add_candy:
+              - '@github.com/opencharly/plugin-record/candy/plugin-record:v2026.272.0412'
+              - '@github.com/opencharly/plugin-spice/candy/plugin-spice:v2026.272.0430'
+              - '@github.com/opencharly/plugin-vision/candy/plugin-vision:v2026.272.0823'
+              - omarchy-pr-apply
+            plan:
+              - check: apply PR $pr via the single apply seam
+                id: pr-apply
+                context: [runtime]
+                command: 'pr-apply $pr ${sha} ${files}'
+              - check: the PR's OWN test suite passes on the applied system
+                id: pr-tests
+                context: [runtime]
+                command: 'for t in ${tests}; do bash "$t" || exit 1; done'
+              ${checks}
+              - check: start a terminal recording
+                id: rec-start
+                context: [runtime]
+                record: {method: start, record_mode: terminal, record_name: pr-$pr}
+              - check: start the SPICE display video capture
+                id: rec-spice-start
+                eventually: 25s
+                retry_interval: 3s
+                context: [runtime]
+                spice: {method: record, action: start, record_name: pr-$pr, fps: 5}
+              - check: drive the PR key command inside the recording
+                id: rec-drive
+                context: [runtime]
+                record:
+                  method: run
+                  record_name: pr-$pr
+                  text: |-
+                    ${drive}
+                  settle_ms: 1000
+              - check: capture the VM display via SPICE
+                id: rec-screen-spice
+                eventually: 25s
+                retry_interval: 3s
+                context: [runtime]
+                spice: {method: screenshot, artifact: /tmp/pr-$pr.png, artifact_min_bytes: 1000, artifact_not_uniform: true}
+              - check: the vision model sees a rendered omarchy desktop in the captured screenshot (the PR's applied UI is evaluated on the live VM, not just asserted by grep)
+                id: screen-vision-judged
+                eventually: 120s
+                retry_interval: 5s
+                context: [runtime]
+                vision:
+                  prompt: "Reply with ONLY the single word YES if this screenshot shows a rendered Linux desktop (a panel/bar and a wallpaper) and NOT a blank, black, or error screen; reply NO otherwise."
+                  artifact: /tmp/pr-$pr.png
+                  # The assertion must require the JUDGEMENT VALUE, not a key: a
+                  # JSON reply like {"desktop": false} would contain the literal
+                  # "desktop" and pass a naive contains/match — a self-defeating
+                  # check. A single-word YES/NO cannot be satisfied by a false
+                  # verdict, so `contains: "yes"` genuinely gates on the answer.
+                  expect: {contains: "yes"}
+              - check: stop the SPICE capture and pull the MJPEG stream
+                id: rec-spice-stop
+                eventually: 25s
+                retry_interval: 3s
+                context: [runtime]
+                spice: {method: record, action: stop, record_name: pr-$pr, artifact: /tmp/pr-$pr.mjpeg, artifact_min_bytes: 10000, artifact_not_uniform: true}
+              - check: stop the terminal recording and pull the .cast
+                id: rec-stop
+                context: [runtime]
+                record: {method: stop, record_name: pr-$pr, artifact: /tmp/pr-$pr.cast, artifact_min_bytes: 200}
+              - check: render the .cast to an animated GIF
+                id: rec-gif
+                eventually: 25s
+                retry_interval: 3s
+                context: [runtime]
+                record: {method: gif, record_name: pr-$pr, artifact: /tmp/pr-$pr.gif, artifact_min_bytes: 100}
+
+        # the NEGATIVE CONTROL: the SAME checks NEGATED, NO apply. Every negated
+        # step must PASS on the pristine golden (every knownRed claim proven).
+        check-omarchy-pr-$pr-control:
+          vm:
+            from: ${golden}
+            disposable: true
+            lifecycle: dev
+            update_gate: skip
+            plan:
+              ${checks:negate}
+
+    stages:
+      - id: oracle
+        kind: agent
+        skill: [omarchy-eval, omarchy-eval-oracle]
+        tools: [pr, ledger]
+        max_turns: 10
+        # render-once-per-pr@sha: a hit reads the committed eval.yml oracle block
+        # and the agent NEVER runs; a new head (or a first run) authors fresh.
+        cache: { path: "eval/pr-$pr/eval.yml", key: "$env.PR_HEAD_SHA", source: oracle }
+        redo:
+          max: 4
+          escalate_after: 5
+          triggers: { redo-plan: oracle }
+        outputs:
+          class: { type: enum, enum: [system, packaging, visual, skip], description: "the PR's change class" }
+          golden: { type: enum, enum: [check-omarchy-eval-base-inst:golden, check-omarchy-eval-rc-inst:golden, check-omarchy-eval-edge-inst:golden, check-omarchy-eval-dev-inst:golden], description: "the golden snapshot the oracle picked for this PR (one of the registry; the :golden snapshot of the channel)" }
+          sha: { type: string, description: "the PR head sha" }
+          files: { type: string_list, description: "the PR's changed file paths" }
+          drive: { type: string, description: "one shell command exercising the PR's key behavior" }
+          tests: { type: string_list, description: "the PR's own test files, absolute paths in the applied system" }
+          checks: { type: object, description: "the known-red behavior checks: [{id, what, assertion, knownRed}]" }
+          what: { type: string, description: "one line: what the PR does (its key behavior)" }
+        prompt: |-
+          REPLY CONTRACT (read this FIRST): your ENTIRE reply is ONE JSON object
+          and NOTHING else. The first character is '{'. No prose, no preamble, no
+          markdown fences, no trailing text. The object carries EXACTLY these
+          fields, every one present:
+            class: "system" | "packaging" | "visual" | "skip"
+            golden: one of "check-omarchy-eval-base-inst:golden" | "check-omarchy-eval-rc-inst:golden" | "check-omarchy-eval-edge-inst:golden" | "check-omarchy-eval-dev-inst:golden"  (the :golden snapshot ref — include the suffix)
+            sha: the PR head sha
+            files: [the PR's changed file paths]
+            drive: one shell command exercising the PR's key behavior
+            tests: [the PR's own test files, absolute paths in the applied system]
+            checks: [ {id, what, assertion, knownRed}, ... ]   (OBJECTS — never bare strings)
+            what: one line describing what the PR does (its key behavior)
+          After you have the PR facts, produce the JSON immediately — do not call
+          more tools.
+
+          You are the Config Oracle for the omarchy PR-eval lane. You decide WHAT to
+          test and HOW — never DO the testing. TRIAGE then PLAN. NEVER run a bed.
+          Follow the omarchy-eval-oracle skill: classify the diff, resolve the PR
+          head sha + changed files + the PR's OWN test files (never invent tests),
+          and author the behavior checks.
+          Every check is a shell assertion (grep/test) that PROVES the PR's behavior
+          on the live system at its ABSOLUTE system paths (/usr/share/omarchy/...,
+          /etc/..., ~/.config/...). Scripts may not be +x after apply: invoke them
+          via their interpreter (bash <abs path>). knownRed is a CONTRACT: the
+          control bed runs the negated assertion on the pristine golden — an
+          assertion that passes without the PR is a FAKE check and the lane
+          re-renders informed. Author assertions that are red by construction:
+          they reference the PR's own added lines.
+          The drive command: ONE shell command that exercises the PR's key behavior
+          inside the recording.
+          A draft or WIP PR is class "skip" — never a faked bed.
+          The golden output is YOUR decision: pick the golden image from the
+          registry per the omarchy-eval-oracle skill (channel-specific PR -> that
+          channel's golden; visual/desktop -> stable unless channel-specific;
+          script/packaging -> stable). Never invent a golden not in the registry.
+          THE CONTROL CONTRACT: when the ledger facts show the control bed FAILED
+          (a negated check failed = an original check PASSED on the pristine golden
+          = a FAKE assertion), call run_outcomes on the control bed FIRST — read the
+          FAILING step — then RE-AUTHOR that check: remove or replace the fake
+          assertion (it must be red by construction). Never re-emit the same checks.
+          YOUR REPLY IS ALWAYS THE JSON OBJECT — even when you conclude the control
+          failure is environmental, the JSON carries the re-authored checks.
+
+      - id: render
+        kind: generate
+        template: "$report.bed_template"
+        skip_when: "@oracle.class == skip"
+        vars:
+          pr: "$pr"
+          golden: "@oracle.golden"
+          sha: "$env.PR_HEAD_SHA"
+          files: "@oracle.files"
+          drive: "@oracle.drive"
+          checks: "@oracle.checks"
+          tests: "@oracle.tests"
+        out: "eval/pr-$pr/charly.yml"
+        validate: |
+          set -eu
+          f="eval/pr-$pr/charly.yml"
+          test -s "$f"
+          if grep -qE -e 'text: [$]drive' -e "pr-apply [0-9]+  '" "$f"; then
+            echo "render: placeholder or empty substitution in the rendered beds" >&2
+            exit 1
+          fi
+          if grep -qE "agent-check|verify with" "$f"; then
+            echo "render: an inert agent-check step rendered — the checks must be command steps" >&2
+            exit 1
+          fi
+          grep -q "check-omarchy-pr-$pr-vm:" "$f" || { echo "render: treatment entity missing" >&2; exit 1; }
+          grep -q "check-omarchy-pr-$pr-control:" "$f" || { echo "render: control entity missing" >&2; exit 1; }
+          "${CHARLY_BIN:-charly}" box validate
+
+      - id: control
+        kind: ade
+        bed: check-omarchy-pr-$pr-control
+        skip_when: "@oracle.class == skip"
+        # FAIL/NO_VALIDATION/SKIP are all LANE DEFECTS: a control that could not
+        # RUN is not "ok" (RCA 2026.257 — NO_VALIDATION silently passed as "ok").
+        fail_on: [FAIL, NO_VALIDATION, SKIP]
+        # The `ade` stage signals a `fail_on` verdict with the trigger named
+        # `setup-defect` (plugin-pipeline executor.go), NOT `redo-plan`/`redo-run`.
+        # The oracle skill's control contract mandates: on a control FAIL, read the
+        # control bed's failing step and RE-AUTHOR the fake assertion (`setup-defect`
+        # -> re-plan). So the trigger map MUST key `setup-defect`; keying only
+        # `redo-plan` left the trigger unmapped, so the redo never fired and the
+        # lane flowed a fake assertion downstream (found live, RCA 2026.258).
+        redo:
+          triggers: { setup-defect: oracle }
+
+      - id: eval
+        kind: ade
+        bed: check-omarchy-pr-$pr-vm
+        skip_when: "@oracle.class == skip"
+        # PASS/FAIL are real outcomes and flow on; NO_VALIDATION/SKIP are lane defects.
+        fail_on: [NO_VALIDATION, SKIP]
+        # Same trigger-vocabulary fix as `control`: the ade `fail_on` emits
+        # `setup-defect` (an unrunnable bed), which re-plans via the oracle.
+        redo:
+          triggers: { setup-defect: oracle }
+
+      - id: media
+        kind: media
+        assemble: true
+        transcode: mjpeg:mp4
+        skip_when: "@oracle.class == skip"
+
+      - id: gate
+        kind: probe
+        verbs: [ledger_gate]
+        skip_when: "@oracle.class == skip"
+        input:
+          bed_name: "check-omarchy-pr-$pr-vm"
+          control_bed_name: "check-omarchy-pr-$pr-control"
+          media_dir: "eval/pr-$pr/media"
+        outputs: [executed_checks, control_ok, media_ok, eval_steps, control_steps]
+
+      - id: validate
+        kind: agent
+        # The org pr-validator grading, fed by the LANE's R10 (the gate ledger
+        # facts) — NOT by author-pasted evidence. The pr-validator normally
+        # assumes R10 already happened; this lane ran it, so the grading stage
+        # consumes the run's own ledger instead of the PR body's claims.
+        skill: [omarchy-eval]
+        tools: [pr, ledger]
+        max_turns: 10
+        # Grade only a real eval outcome (PASS/FAIL) — the SAME condition as
+        # report/cold-read. Do NOT mix || with && here: evalCond splits on " && "
+        # BEFORE " || ", so a parenthesized OR-of-AND is mis-parsed (RCA this run).
+        # Under class "skip" the eval stage is skipped, so @eval.verdict is empty —
+        # which already satisfies this condition.
+        skip_when: "@eval.verdict != PASS && @eval.verdict != FAIL"
+        redo:
+          max: 3
+          escalate_after: 4
+          triggers: { redo-plan: validate }
+        outputs:
+          verdict: { type: enum, enum: [PASS, BLOCK], description: "the org pr-validator verdict for this upstream PR" }
+          security: { type: string, description: "ONE compact line: the T1–T4 security-screen results joined by ' | '" }
+          checklist: { type: string_list, description: "one line per pr-validator checklist item: PASS/FAIL/N/A + a one-line reason" }
+          findings: { type: string_list, description: "the blocking findings (file:line + exactly what to fix); empty on PASS" }
+        prompt: |-
+          You are the FRESH pr-validator grading an UPSTREAM omacom/omarchy PR on
+          behalf of the eval-omarchy lane. You did not author the checks and you do
+          not run beds.
+
+          YOUR CRITERIA ARE THE `omarchy-eval` SKILL ALREADY IN YOUR CONTEXT (it is
+          appended above): its APPLICABILITY MAP scopes the org-wide pr-validator
+          spec (`pr-validator-agent`, opencharly/layer-charly-internals-extra) to an
+          upstream PR and is the authority for WHAT to grade. Grade EVERY item in
+          that map PASS/FAIL/N/A with a one-line reason; a single applicable FAIL is
+          a BLOCK; when in doubt, BLOCK. The map is authoritative — do not invent
+          items it does not list.
+
+          THE ONE SUBSTITUTION. The pr-validator normally ASSUMES the author ran R10
+          and pasted the evidence in the PR body. THIS lane ran the R10 itself: the
+          ledger facts in your user message (`executed_checks`, `control_ok`,
+          `media_ok`, the per-step `eval_steps`/`control_steps`) ARE the R10
+          evidence. Do NOT require or accept the PR body's own test/R10 claims — the
+          PR body is a CLAIM under test, never evidence.
+
+          Do NOT write any file. Do NOT post. Do not decide merge/tag — that is
+          opencharly landing mechanics and is N/A for an upstream PR.
+
+          REPLY CONTRACT: your ENTIRE reply is ONE JSON object and NOTHING else.
+          The object carries EXACTLY these fields:
+            verdict: "PASS" | "BLOCK"
+            security: ONE compact string, the four T-items joined by " | "
+            checklist: a JSON ARRAY of strings, one per item in the applicability
+              map, each "PASS|FAIL|N/A — <item>: <one-line reason>"
+            findings: a JSON ARRAY of strings, one per blocking finding, each
+              "file:line — <finding> — <what to fix>"; empty [] on PASS
+
+      - id: report
+        kind: agent
+        skill: [omarchy-eval]
+        tools: [ledger]
+        max_turns: 6
+        skip_when: "@eval.verdict != PASS && @eval.verdict != FAIL"
+        redo:
+          max: 3
+          escalate_after: 4
+          triggers: { redo-plan: report }
+        outputs:
+          tests: { type: string, description: "the user-voice Tests paragraph" }
+        prompt: |-
+          You are a fellow omarchy user who pulled this PR onto your machine and
+          tested it. Write like a user in an issue comment: first person, plain
+          words, what you did and what you actually saw happen.
+          The ledger facts in your user message carry the oracle plan, the eval
+          verdict, and the executed step outcomes — narrate from THOSE facts, never
+          from guessing. Name every executed check with its observed outcome; say
+          plainly what you could NOT test and why — never silent, never a lament.
+          The Suggestions section is owned by the cold-read stage — do NOT emit it.
+          Do NOT write any file. Do NOT post.
+          REPLY CONTRACT: your ENTIRE reply is ONE JSON object and NOTHING else.
+          The object carries EXACTLY one field: "tests" — the ENTIRE Tests section
+          as one compact user-voice paragraph.
+
+      - id: cold-read
+        kind: agent
+        skill: [omarchy-eval, omarchy-eval-cold-reader]
+        tools: [ledger]
+        max_turns: 6
+        skip_when: "@eval.verdict != PASS && @eval.verdict != FAIL"
+        redo:
+          max: 3
+          escalate_after: 4
+          triggers: { redo-plan: cold-read }
+        outputs:
+          verdict: { type: enum, enum: [PASS, FAIL, NO_VALIDATION], description: "the packet verdict" }
+          suggestions: { type: string_list, description: "the user-voice suggestions: a LIST of short strings, one per element" }
+        prompt: |-
+          Fresh-context validation of the evidence packet against the ledger facts
+          in your user message. The deterministic gates first (executed_checks >= 1,
+          control_ok, media_ok from the gate stage), then the prose gates (every
+          material claim corroborated, user-voice, no verdict language, no lament).
+          A packet with zero executed checks is a SETUP_DEFECT — say so plainly.
+          REPLY CONTRACT: your ENTIRE reply is ONE JSON object and NOTHING else.
+          The object carries EXACTLY the declared outputs (verdict, suggestions).
+          "verdict" is one of the strings PASS | FAIL | NO_VALIDATION.
+          "suggestions" is a JSON ARRAY of short strings, NEVER a joined string.
+          The verdict is the PACKET verdict (SETUP_DEFECT is a lane classification).
+
+      - id: record
+        kind: emit
+        # SCHEMA-FIRST: the structured #EvalRecord value is validated against
+        # candy/eval-pr/record.cue BEFORE it is written; the prose `report` field
+        # is a string leaf rendered from the report.template. The record can
+        # therefore never be malformed YAML (the free-form `generate` template it
+        # replaces emitted `what: …: …`, which no parser could read — RCA 2026.259).
+        schema: "candy/eval-pr/record.cue#EvalRecord"
+        skip_when: "@oracle.class == skip"
+        value:
+          pr: "$pr"
+          repo: omacom/omarchy
+          head: "$env.PR_HEAD_SHA"
+          generated: "$calver"
+          oracle:
+            class: "@oracle.class"
+            golden: "@oracle.golden"
+            sha: "$env.PR_HEAD_SHA"
+            what: "@oracle.what"
+            drive: "@oracle.drive"
+            files: "@oracle.files"
+            tests: "@oracle.tests"
+            checks: "@oracle.checks"
+          control:
+            ok: "@gate.control_ok"
+            steps: "@gate.control_steps"
+          eval:
+            verdict: "@eval.verdict"
+            executed_checks: "@gate.executed_checks"
+            steps: "@gate.eval_steps"
+          gates:
+            control_ok: "@gate.control_ok"
+            executed_checks: "@gate.executed_checks"
+            media_ok: "@gate.media_ok"
+          validate:
+            verdict: "@validate.verdict"
+            security: "@validate.security"
+            checklist: "@validate.checklist"
+            findings: "@validate.findings"
+          media:
+            cast: "media/pr-$pr.cast"
+            gif: "media/pr-$pr.gif"
+            mjpeg: "media/pr-$pr.mjpeg"
+            mp4: "media/pr-$pr.mp4"
+            png: "media/pr-$pr.png"
+          cold_read:
+            verdict: "@cold-read.verdict"
+            suggestions: "@cold-read.suggestions"
+          report: "$report.template"
+        # the string-leaf template vars (the report prose is assembled from these)
+        vars:
+          pr: "$pr"
+          golden: "@oracle.golden"
+          calver: "$calver"
+          tests_body: "@report.tests"
+          suggestions: "@cold-read.suggestions"
+        out: "eval/pr-$pr/eval.yml"
+        validate: |
+          set -eu
+          f="eval/pr-$pr/eval.yml"
+          test -s "$f"
+          # The record is schema-validated by the emit stage; this authored
+          # validator covers the PROSE contract the schema cannot (user voice).
+          for s in "## Tests" "## Suggestions"; do grep -qF "$s" "$f" || { echo "record: missing section: $s" >&2; exit 1; }; done
+          # The org pr-validator verdict + the T1–T4 security screen must reach the
+          # record (the lane's whole point is grading the R10 against that spec).
+          # Anchor on the `validate:` block — the cold_read block also has a
+          # `verdict:` key and would confuse a bare grep.
+          vblock=$(sed -nE "/^[[:space:]]*validate:/,/^[[:space:]]*media:/p" "$f")
+          printf '%s\n' "$vblock" | grep -qE "^[[:space:]]*verdict: (PASS|BLOCK)[[:space:]]*$" || { echo "record: missing pr-validator validate.verdict" >&2; exit 1; }
+          printf '%s\n' "$vblock" | grep -qE "^[[:space:]]*security: .+" || { echo "record: missing pr-validator security screen" >&2; exit 1; }
+          printf '%s\n' "$vblock" | grep -qE "^[[:space:]]*checklist:" || { echo "record: missing pr-validator checklist" >&2; exit 1; }
+          # The report prose is a YAML block scalar (`report: |-`), so its lines
+          # are INDENTED — the footer is not at column 0. Anchor on the line's
+          # content after optional leading spaces, or the check rejects a perfectly
+          # valid record (it did: the footer renders at indent 2).
+          grep -qE "^[[:space:]]*\*Assisted-by: .+\*[[:space:]]*$" "$f" || { echo "record: missing Assisted-by footer" >&2; exit 1; }
+          grep -qE "^[[:space:]]*\*Tested-by: .+\*[[:space:]]*$" "$f" || { echo "record: missing Tested-by footer" >&2; exit 1; }
+          # Verdict language must not leak into the USER-VOICE report; the record's
+          # own `verdict:` KEY (a real field, unindented) is legitimate, so anchor
+          # the banned form to a YAML comment or a heading, not a key.
+          if grep -qE "^[[:space:]]*#.*\b(PASS|FAIL|NO_VALIDATION)\b" "$f"; then echo "record: verdict language present — the report is user-voice" >&2; exit 1; fi
+          # Same block-scalar indent as the footers: the report's section headings
+          # are INDENTED, so anchor the range on optional leading whitespace too.
+          sed -nE "/^[[:space:]]*## Tests/,/^[[:space:]]*## Suggestions/p" "$f" | grep -qiE "(worked|didn't|did not|failed|passed|N/A|not testable|could not|couldn't)" || { echo "record: Tests lacks observed outcomes" >&2; exit 1; }
+          if grep -qE "no entity|ktree is not installed|harness failed|NO_VALIDATION" "$f"; then echo "record: harness-failure language — SETUP_DEFECT, not an eval" >&2; exit 1; fi
+          for p in cast gif mjpeg mp4 png; do test -s "eval/pr-$pr/media/pr-$pr.$p" || { echo "record: evidence path missing: media/pr-$pr.$p" >&2; exit 1; }; done
+          test -d ".check/check-omarchy-pr-$pr-vm" || { echo "record: the run matrix dir is missing" >&2; exit 1; }
+          if grep -qE "^  - name:" "$f"; then echo "record: inlined step matrix — link the evidence instead" >&2; exit 1; fi
+
+      - id: not-testable
+        kind: emit
+        # a class "skip" (draft/WIP) emits the NOT_TESTABLE_PR record instead of a
+        # bed-run record — schema-first against #NotTestableRecord (it carries a
+        # plain disclosure, not a tier, R1).
+        schema: "candy/eval-pr/record.cue#NotTestableRecord"
+        value:
+          pr: "$pr"
+          repo: omacom/omarchy
+          head: "$env.PR_HEAD_SHA"
+          generated: "$calver"
+          oracle:
+            class: skip
+            golden: "@oracle.golden"
+            sha: "$env.PR_HEAD_SHA"
+            what: "@oracle.what"
+            drive: ""
+            files: []
+            tests: []
+            checks: []
+          result: NOT_TESTABLE_PR
+          report: |-
+            # I looked at omacom/omarchy#$pr — this one is not testable yet
+
+            ## Tests
+            This PR is a draft or WIP — there is no testable behavior to exercise on
+            this setup yet. What it does: ${what}
+
+            When it is ready for review, the lane will evaluate it like any other PR.
+
+            ## Suggestions
+            - Mark the PR ready for review when the behavior is implemented.
+
+            *Assisted-by: charly eval-pr agent ollama/deepseek-v4.1-flash:cloud (triage only — no validation performed)*
+            *Tested-by: charly eval-pr (triage only; no bed run)*
+        vars:
+          pr: "$pr"
+          what: "@oracle.what"
+        out: "eval/pr-$pr/eval.yml"
+        skip_when: "@oracle.class != skip"
+
+      - id: publish
+        kind: gate
+        condition: "$env.EVAL_PUBLISH == approve"
+        skip_when: "$env.EVAL_PUBLISH != approve || @cold-read.verdict == NO_VALIDATION"

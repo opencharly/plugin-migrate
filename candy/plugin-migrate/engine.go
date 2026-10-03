@@ -99,6 +99,7 @@ var goHooks = map[string]func(*yaml.Node) bool{
 	"unrollGroupDeploy":       unrollGroupDeploy,       // targetless deploy group: node → primary substrate + deploy-level siblings (reshape_group_deploy.go)
 	"reshapeDeployCPU":        reshapeDeployCPU,        // deploy override cpus: → cpu: direct-child rename, path-scoped (reshape_deploy_cpu.go)
 	"rekeyLegacyVMOverlay":    rekeyLegacyVMOverlay,    // per-host overlay legacy vm:<identity> deploy keys → drop-on-twin / hard-error (reshape_rekey_vm_overlay.go)
+	"reshapePipelineLobster":  reshapePipelineLobster,  // legacy kind:pipeline stages: grammar → lobster steps:/verb-sugar grammar (reshape_pipeline_lobster.go)
 }
 
 // migrationTable is the validated, declaration-ordered step list, loaded once at
