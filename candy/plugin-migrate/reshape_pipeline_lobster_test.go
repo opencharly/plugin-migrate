@@ -243,13 +243,25 @@ func TestPipelineLobsterIdempotent(t *testing.T) {
 	}
 }
 
-// TestMigrationTable_PipelineLobster: pipeline-lobster-syntax is the LAST (newest) table
-// entry — a project-only apply: goHook (a pipeline body is never authored on the per-host
-// deploy overlay, so no touches_host).
+// TestMigrationTable_PipelineLobster: pipeline-lobster-syntax is a project-only apply:
+// goHook (a pipeline body is never authored on the per-host deploy overlay, so no
+// touches_host). The entry is found BY NAME, not as the last element: the table is
+// append-only and a newer cutover IS the new last entry — a positional lookup reports a
+// false failure the moment one lands (it did when retire-empty-group-node was appended).
 func TestMigrationTable_PipelineLobster(t *testing.T) {
-	m := migrationTable[len(migrationTable)-1]
-	if m.Name != "pipeline-lobster-syntax" || m.Apply != "reshapePipelineLobster" || m.TouchesHost {
-		t.Errorf("unexpected last table entry: %+v", m)
+	var m migration
+	found := false
+	for _, e := range migrationTable {
+		if e.Name == "pipeline-lobster-syntax" {
+			m, found = e, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("pipeline-lobster-syntax is not in the migration table")
+	}
+	if m.Apply != "reshapePipelineLobster" || m.TouchesHost {
+		t.Errorf("unexpected pipeline-lobster-syntax table entry: %+v", m)
 	}
 	if _, ok := goHooks[m.Apply]; !ok {
 		t.Errorf("hook %q not registered in goHooks", m.Apply)

@@ -31,9 +31,30 @@ func TestMigrationTable_CompactNodeForm(t *testing.T) {
 // TestMigrationTable_StripCandyLibvirtField: the table carries the candy-level
 // `libvirt:` field removal as a project-only (non-touches_host) apply: goHook
 // entry, strictly after compact-node-form.
+//
+// The table's shape is asserted APPEND-PROOF rather than by a hard-coded entry count:
+// the table is append-only (a new cutover IS a new entry, appended last), so a frozen
+// total is a change-detector that reports a false failure on every legitimate append —
+// it did exactly that when retire-empty-group-node was appended. The invariants that
+// actually protect the table are asserted instead: every entry is well-formed (exactly
+// one of ops/apply, this engine's own gate), no name repeats, and the oldest entry is
+// still present.
 func TestMigrationTable_StripCandyLibvirtField(t *testing.T) {
-	if len(migrationTable) != 12 {
-		t.Fatalf("migration table should carry exactly 12 entries, got %d", len(migrationTable))
+	seen := map[string]bool{}
+	for i, e := range migrationTable {
+		if e.Name == "" {
+			t.Fatalf("table entry %d carries no name: %+v", i, e)
+		}
+		if seen[e.Name] {
+			t.Fatalf("table entry %q appears more than once", e.Name)
+		}
+		seen[e.Name] = true
+		if (len(e.Ops) > 0) == (e.Apply != "") {
+			t.Fatalf("table entry %q must carry exactly one of ops/apply: %+v", e.Name, e)
+		}
+	}
+	if !seen["compact-node-form"] {
+		t.Fatalf("the oldest table entry (compact-node-form) is missing")
 	}
 	m := migrationTable[1]
 	if m.Name != "strip-candy-libvirt-field" || m.Apply != "stripCandyLibvirtField" || m.TouchesHost {
