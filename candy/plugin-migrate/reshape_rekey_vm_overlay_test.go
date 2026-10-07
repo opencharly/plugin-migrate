@@ -46,11 +46,24 @@ func overlayDeployKeys(t *testing.T, path string) map[string]bool {
 }
 
 // TestMigrationTable_RekeyLegacyVMOverlay: the table carries the per-host-overlay
-// legacy `vm:` key migration as a touches_host apply: goHook entry (no longer the
-// last step — pipeline-lobster-syntax was appended after it).
+// legacy `vm:` key migration as a touches_host apply: goHook entry. The entry is found
+// BY NAME, not by index: the table is append-only, so a positional lookup (`[…-2]`)
+// silently re-points at whatever was appended last and reports a false failure — it
+// did exactly that when retire-empty-group-node was appended after
+// pipeline-lobster-syntax.
 func TestMigrationTable_RekeyLegacyVMOverlay(t *testing.T) {
-	m := migrationTable[len(migrationTable)-2]
-	if m.Name != "rekey-legacy-vm-overlay" || m.Apply != "rekeyLegacyVMOverlay" || !m.TouchesHost {
+	var m migration
+	found := false
+	for _, e := range migrationTable {
+		if e.Name == "rekey-legacy-vm-overlay" {
+			m, found = e, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("rekey-legacy-vm-overlay is not in the migration table")
+	}
+	if m.Apply != "rekeyLegacyVMOverlay" || !m.TouchesHost {
 		t.Errorf("unexpected rekey-legacy-vm-overlay table entry: %+v", m)
 	}
 	if _, ok := goHooks[m.Apply]; !ok {

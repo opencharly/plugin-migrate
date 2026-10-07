@@ -67,6 +67,26 @@ check-migrate-local:
               command:
                 command: 'd=$(mktemp -d); printf "version: 2026.240.1943\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only --dry-run; rc=$?; grep -q "^version:" "$d/charly.yml" || rc=1; rm -rf "$d"; exit $rc'
                 in_container: false
+            - check: charly migrate RETIRES a barren `group:` node (a group with nothing to promote) so a config that could not load now loads — the per-host overlay that made every VM bed on the host unbootable when it carried one (charly#827), proven by the node being gone AND the fixture validating afterwards
+              id: migrate-retires-barren-group-node
+              exit_status: 0
+              stderr:
+                - contains: 'applied retire-empty-group-node'
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); printf "discover:\n    - path: candy\n      recursive: true\n" > "$d/charly.yml"; printf "leftover:\n    group: {}\n" >> "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; grep -q "group:" "$d/charly.yml" && rc=1; ${CHARLY_BIN} box validate --dir "$d" >/dev/null 2>&1 || rc=1; rm -rf "$d"; exit $rc'
+                in_container: false
+            - check: a SECOND charly migrate on the already-retired document is a no-op (exit 0, "nothing to migrate") — the retire step is idempotent
+              id: migrate-retire-barren-group-idempotent
+              exit_status: 0
+              stderr:
+                - contains: 'nothing to migrate'
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); printf "discover:\n    - path: candy\n      recursive: true\n" > "$d/charly.yml"; printf "leftover:\n    group: {}\n" >> "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only >/dev/null 2>&1; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
+                in_container: false
             - check: charly migrate rewrites the legacy kind-pipeline grammar into lobster steps syntax (stages→steps, kind-command→run, skip_when→inverted when, @stage.out→$stage.json.out), adds the required description, consolidates config, declares args pr, duplicates into each lifted verb body the entity-level knobs that verb reads (skills/llm/repo, media, report) so the lifted verb is self-contained on a plan with no pipeline config, and leaves @github candy refs + shell vars byte-identical
               id: migrate-pipeline-v1
               exit_status: 0

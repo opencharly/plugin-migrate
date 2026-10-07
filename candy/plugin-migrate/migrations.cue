@@ -173,4 +173,26 @@ migrations: [
 		// entity is never authored on the per-host deploy overlay — no touches_host.
 		apply: "reshapePipelineLobster"
 	},
+	{
+		name: "retire-empty-group-node"
+		// the BARREN `group:` node — a residual group with NO member to promote —
+		// has no post-cutover spelling at all: `unroll-group-deploy` above promotes
+		// the first member into the primary kind, so an empty group is left for the
+		// load-time gate, and that gate can never clear it (the node carries no kind
+		// discriminator, so the document hard-fails and the message tells the reader
+		// to run `charly migrate` — the command that just walked past it). A per-host
+		// overlay carrying one leftover node is therefore UNLOADABLE, and because the
+		// overlay is read for every `kind: vm` command, every VM bed on that host is
+		// unbootable (charly#827). This step RETIRES the node: a mapping ENTRY whose
+		// value has a mapping-valued `group:` key and no other mapping-valued child is
+		// removed from its parent. Narrow on purpose — a group whose first member
+		// merely lacks a kind word, and any node with some other unknown key, are left
+		// exactly as before, so the hook never guesses and never drops authored content.
+		// None of the four key-transform ops can express a predicate-keyed entry
+		// deletion (the entry NAME is authored, not derivable), so a Go reshaper hook
+		// does it. touches_host: the residual node the field report names lives in the
+		// per-host overlay, which is swept only for a host-touching step.
+		touches_host: true
+		apply:        "retireEmptyGroupNode"
+	},
 ]
