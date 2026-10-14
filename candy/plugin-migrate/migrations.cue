@@ -195,4 +195,29 @@ migrations: [
 		touches_host: true
 		apply:        "retireEmptyGroupNode"
 	},
+	{
+		name: "podman-jobs-to-stage-parallelism"
+		// the build-speed INNER parallelism knob was NAMED for the engine it was handed
+		// to (`podman build --jobs N`). With ONE image builder there is no second engine
+		// left to name — but the knob itself SURVIVES, because it does real work: it
+		// bounds the STAGES of a single build, while the OUTER `jobs:` keeps its own name
+		// and bounds images per DAG level. So this is a rename, never a fold into `jobs:`
+		// and never a deletion. Its schema half landed in `spec`: the CLOSED def no longer
+		// declares `podman_jobs`, so an authored config still carrying it fails to load
+		// and the diagnostic points the reader at `charly migrate` — which is this step.
+		// Two ops, not one: the walker matches a key EXACTLY, so `podman_jobs` never
+		// matches `podman_jobs_cap` (the same reason `k8s-to-kubernetes` above needs two).
+		// scope: any — both keys are authored INSIDE the `defaults:` block, so a
+		// root-scoped op would never see them.
+		// NOT touches_host: the per-host overlay (~/.config/charly/charly.yml) is a
+		// RuntimeConfig — engine / run_mode / bind_address / storage / secret_backend /
+		// vm / vnc — and carries no build defaults at all, so no overlay can hold these
+		// keys. Marking the step host-touching would not sweep anything extra; it would
+		// only make remote-cache auto-migration SKIP it and leave every cached project
+		// document carrying the retired name.
+		ops: [
+			{op: "rename_key", from: "podman_jobs", to: "stage_parallelism", scope: "any"},
+			{op: "rename_key", from: "podman_jobs_cap", to: "stage_parallelism_cap", scope: "any"},
+		]
+	},
 ]
