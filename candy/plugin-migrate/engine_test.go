@@ -98,6 +98,126 @@ func TestMigrationTable_K8sToKubernetes(t *testing.T) {
 	}
 }
 
+// TestMigrationTable_PodmanJobsToStageParallelism: the LAST (newest) entry carries
+// the build-speed inner-knob rename — `podman_jobs`/`podman_jobs_cap` →
+// `stage_parallelism`/`stage_parallelism_cap` — as two ORDERED rename_key ops over
+// the whole document, and it is NOT touches_host: the per-host overlay is a
+// RuntimeConfig and carries no build defaults, so a host-touching flag here would
+// only make remote-cache auto-migration skip a PROJECT key.
+func TestMigrationTable_PodmanJobsToStageParallelism(t *testing.T) {
+	if len(migrationTable) == 0 {
+		t.Fatal("migration table is empty")
+	}
+	m := migrationTable[len(migrationTable)-1]
+	if m.Name != "podman-jobs-to-stage-parallelism" || len(m.Ops) != 2 {
+		t.Fatalf("unexpected last table entry: %+v", m)
+	}
+	if m.TouchesHost {
+		t.Error("the step renames a PROJECT key; touches_host would make remote-cache auto-migration skip it")
+	}
+	if m.Apply != "" {
+		t.Errorf("a pure ops step must carry no apply hook: %+v", m)
+	}
+	op1, op2 := m.Ops[0], m.Ops[1]
+	if op1.Op != "rename_key" || op1.From != "podman_jobs" || op1.To != "stage_parallelism" || op1.Scope != "any" {
+		t.Errorf("op1 should rename podman_jobs→stage_parallelism scope any: %+v", op1)
+	}
+	if op2.Op != "rename_key" || op2.From != "podman_jobs_cap" || op2.To != "stage_parallelism_cap" || op2.Scope != "any" {
+		t.Errorf("op2 should rename podman_jobs_cap→stage_parallelism_cap scope any: %+v", op2)
+	}
+	// Two ops are REQUIRED, not cosmetic: the walker matches a key exactly, so one
+	// op can never carry both keys. Prove the shipped PAIR covers both.
+	out, changed := applyTransform(t, m, "defaults:\n  podman_jobs: 0\n  podman_jobs_cap: 8\n")
+	if !changed || strings.Contains(out, "podman_jobs") {
+		t.Fatalf("the shipped entry left a retired key behind: %q", out)
+	}
+	if !strings.Contains(out, "stage_parallelism: 0") || !strings.Contains(out, "stage_parallelism_cap: 8") {
+		t.Errorf("both keys must be renamed with their values: %q", out)
+	}
+}
+
+// TestPodmanJobsToStageParallelism_KeepsTheOuterKnob: the renamed knob is the INNER
+// one (stages of a single build); the outer `jobs:` (images per DAG level) keeps its
+// own name. This is the assertion that fails if the step is ever "improved" into a
+// fold, and it pins the renamed key's value AND its inline comment.
+func TestPodmanJobsToStageParallelism_KeepsTheOuterKnob(t *testing.T) {
+	m := migrationTable[len(migrationTable)-1]
+	if m.Name != "podman-jobs-to-stage-parallelism" {
+		t.Fatalf("last entry is %q, expected the rename step", m.Name)
+	}
+	in := "defaults:\n  jobs: 4\n  podman_jobs: 0 # 0 = auto\n  podman_jobs_cap: 8\n"
+	out, changed := applyTransform(t, m, in)
+	if !changed {
+		t.Fatal("the rename reported no change on a document carrying the retired keys")
+	}
+	if !strings.Contains(out, "jobs: 4") {
+		t.Errorf("the OUTER jobs: knob must keep its name and value: %q", out)
+	}
+	if !strings.Contains(out, "stage_parallelism: 0") || !strings.Contains(out, "0 = auto") {
+		t.Errorf("the renamed key must keep its value and inline comment: %q", out)
+	}
+	if strings.Contains(out, "podman_jobs") {
+		t.Errorf("a retired key survived: %q", out)
+	}
+	// Idempotent by contract: the whole table is applied on every run.
+	if _, again := applyTransform(t, m, out); again {
+		t.Error("second pass changed an already-migrated document")
+	}
+}
+
+// TestRunMigrations_RenamesPodmanJobsToStageParallelism: the rename through the REAL
+// driver, on disk — not just the op-walker. A project document authored with the
+// retired keys comes out carrying the new names with their values, the OUTER `jobs:`
+// untouched, and a SECOND full run reports no change (the table's idempotency
+// contract, exercised end to end).
+//
+// project-only is passed deliberately: a unit test must never be able to sweep
+// per-host state, and the key under test is a PROJECT key (the per-host overlay is a
+// RuntimeConfig with no build defaults).
+func TestRunMigrations_RenamesPodmanJobsToStageParallelism(t *testing.T) {
+	dir := t.TempDir()
+	body := "" +
+		"discover: []\n" +
+		"defaults:\n" +
+		"  jobs: 4\n" +
+		"  podman_jobs: 0 # 0 = auto\n" +
+		"  podman_jobs_cap: 8\n"
+	root := filepath.Join(dir, "charly.yml")
+	if err := os.WriteFile(root, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	changed, err := runMigrations(&MigrateContext{Dir: dir, Out: &out}, true)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected the retired keys to be renamed; output: %q", out.String())
+	}
+	after, _ := os.ReadFile(root)
+	got := string(after)
+	if strings.Contains(got, "podman_jobs") {
+		t.Errorf("a retired key survived the real driver:\n%s", got)
+	}
+	if !strings.Contains(got, "stage_parallelism: 0") || !strings.Contains(got, "stage_parallelism_cap: 8") {
+		t.Errorf("both keys must be renamed with their values:\n%s", got)
+	}
+	if !strings.Contains(got, "jobs: 4") {
+		t.Errorf("the outer jobs: knob was damaged:\n%s", got)
+	}
+	if !strings.Contains(got, "0 = auto") {
+		t.Errorf("the renamed key's inline comment was lost:\n%s", got)
+	}
+	var out2 bytes.Buffer
+	again, err := runMigrations(&MigrateContext{Dir: dir, Out: &out2}, true)
+	if err != nil {
+		t.Fatalf("second runMigrations: %v", err)
+	}
+	if again {
+		t.Errorf("second run reported changes on an already-migrated project: %q", out2.String())
+	}
+}
+
 // TestStripCandyLibvirtField_RemovesCandyLevelOnly: the reshaper removes ONLY the
 // direct candy-body `libvirt:` field, leaving a same-named `vm:`-kind entity's own
 // domain-config `libvirt: {...}` object AND a `libvirt:` check-verb step nested in
