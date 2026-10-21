@@ -140,6 +140,39 @@ const pipelineLobsterFixture = `demo-pipeline:
               condition: "$env.PUBLISH == approve"
 `
 
+// pipelinePlanIntents is the FROZEN TARGET intent vocabulary a migrated plan element must open
+// with (spec.StepKeywords, recorded here rather than read from the live registry for the reason
+// the reshape's vocabulary note gives). A migrated element is
+// `{<intent>: <label>, <verb>: {…}}`: the intent keyword is the step's exec arm, the verb key
+// carries the lifted body beside it.
+var pipelinePlanIntents = map[string]bool{
+	"run": true, "check": true, "agent-run": true, "agent-check": true, "include": true,
+}
+
+// pipelinePlanVerb splits a migrated plan element into its verb kind and verb body. ok is false
+// unless the element carries exactly one intent keyword AND exactly one verb key.
+func pipelinePlanVerb(elem map[string]any) (string, map[string]any, bool) {
+	kind := ""
+	var body map[string]any
+	intents := 0
+	for k, v := range elem {
+		if pipelinePlanIntents[k] {
+			intents++
+			continue
+		}
+		if kind != "" {
+			return "", nil, false // two verb keys — the loader allows at most one sugar key
+		}
+		kind = k
+		body, _ = v.(map[string]any)
+	}
+	if intents != 1 || kind == "" {
+		return "", nil, false
+	}
+	return kind, body, true
+}
+
+// pipelineLobsterMigrate runs the reshape over a fixture and returns the migrated document.
 func pipelineLobsterMigrate(t *testing.T, in string) string {
 	t.Helper()
 	out, changed := applyTransform(t, migration{Name: "t", Apply: "reshapePipelineLobster"}, in)
@@ -205,9 +238,9 @@ func TestPipelineLobsterGrammarRewrite(t *testing.T) {
 		"escalate_after: 5",
 		"triggers:",
 		"redo-plan: oracle",
-		"- agent:",
-		"- probe:",
-		"- emit:",
+		"- run: oracle",
+		"- run: gate",
+		"- run: report",
 		"!($oracle.json.class == skip)",
 		"!($gate.json.ok != PASS && $gate.json.ok != FAIL)",
 		"$oracle.json.golden",
@@ -218,7 +251,7 @@ func TestPipelineLobsterGrammarRewrite(t *testing.T) {
 		"${CHARLY_BIN}",
 		"bed-${pr}",
 		"args:",
-		"the value bound per lane by --prs",
+		"the pr value this run is invoked with (--args-json)",
 		"$report.bed_template",
 	} {
 		if !strings.Contains(out, want) {
@@ -230,6 +263,103 @@ func TestPipelineLobsterGrammarRewrite(t *testing.T) {
 	// single negation) and the `&&` case is not re-parenthesized.
 	if strings.Contains(out, "!((@") || strings.Contains(out, "!(($") {
 		t.Errorf("when inversion must not double-parenthesize:\n%s", out)
+	}
+}
+
+// TestPipelineLobsterEmittedShapeIsLoadable — the LOAD-GATE control this reshape shipped
+// without, and the reason plugin-migrate#20 existed: the unit above asserts the emitted
+// TEXT, so a fixture that encoded an unloadable shape as the expected shape passed. This
+// test asks the question the LOADER asks, over the migrated document itself, and would have
+// failed on every migrated config before the fix:
+//
+//   - every `plan:` element opens with EXACTLY ONE intent keyword from the closed set the
+//     loader enforces (spec.StepKeywords); a lifted verb emitted as `{<verb>: {…}}` alone is
+//     rejected with `plan[0] has no intent keyword`, which is a whole-document load failure;
+//   - every emitted `args:` entry declares ONLY fields `#TaskParamSpec` admits
+//     (description/default/required); an emitted `type:` is `field not allowed` on a CLOSED
+//     def and is likewise a whole-document load failure.
+//
+// It deliberately does not depend on the pipeline schema or on plugin-pipeline: the intent
+// vocabulary is the FROZEN TARGET shape (see the vocabulary note in the reshape), so this
+// test can run in this unit's tree while still failing the moment the emitted form stops
+// being loadable.
+func TestPipelineLobsterEmittedShapeIsLoadable(t *testing.T) {
+	// spec.StepKeywords, frozen on purpose: this file may not read the live registry.
+	intentKeywords := map[string]bool{
+		"run": true, "check": true, "agent-run": true, "agent-check": true, "include": true,
+	}
+	// #TaskParamSpec's closed field set (spec/schema/task.cue).
+	taskParamSpecFields := map[string]bool{"description": true, "default": true, "required": true}
+
+	out := pipelineLobsterMigrate(t, pipelineLobsterFixture)
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("migrated output is not parseable YAML: %v\n%s", err, out)
+	}
+
+	plans, params := 0, 0
+	var walk func(n *yaml.Node, path string)
+	walk = func(n *yaml.Node, path string) {
+		if n.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				k, v := n.Content[i], n.Content[i+1]
+				switch {
+				case k.Value == "plan" && v.Kind == yaml.SequenceNode:
+					for idx, elem := range v.Content {
+						plans++
+						if elem.Kind != yaml.MappingNode {
+							t.Fatalf("%s.plan[%d] is not a mapping", path, idx)
+						}
+						intents := 0
+						verbKeys := []string{}
+						for j := 0; j+1 < len(elem.Content); j += 2 {
+							key := elem.Content[j].Value
+							if intentKeywords[key] {
+								intents++
+								continue
+							}
+							verbKeys = append(verbKeys, key)
+						}
+						if intents != 1 {
+							t.Errorf("%s.plan[%d] carries %d intent keywords, want exactly 1 (the loader rejects this with \"no intent keyword\") — keys %v",
+								path, idx, intents, verbKeys)
+						}
+						if len(verbKeys) != 1 {
+							t.Errorf("%s.plan[%d] carries %d non-intent keys %v, want exactly 1 (the lifted verb)",
+								path, idx, len(verbKeys), verbKeys)
+						}
+					}
+				case k.Value == "args" && v.Kind == yaml.MappingNode:
+					for j := 0; j+1 < len(v.Content); j += 2 {
+						spec := v.Content[j+1]
+						if spec.Kind != yaml.MappingNode {
+							continue
+						}
+						params++
+						for m := 0; m+1 < len(spec.Content); m += 2 {
+							field := spec.Content[m].Value
+							if !taskParamSpecFields[field] {
+								t.Errorf("%s.args.%s declares %q, which #TaskParamSpec does not admit (description/default/required) — the loader rejects this with \"field not allowed\"",
+									path, v.Content[j].Value, field)
+							}
+						}
+					}
+				}
+				walk(v, path+"."+k.Value)
+			}
+			return
+		}
+		for _, c := range n.Content {
+			walk(c, path)
+		}
+	}
+	walk(&doc, "")
+
+	if plans == 0 {
+		t.Fatal("no plan: sequences found in the migrated fixture — the control asserted nothing")
+	}
+	if params == 0 {
+		t.Fatal("no args: entries found in the migrated fixture — the #TaskParamSpec control asserted nothing")
 	}
 }
 
@@ -483,25 +613,23 @@ func assertVerbKnobsSelfContained(t *testing.T, doc string) int {
 				continue // a `run:` step has no verb body
 			}
 			elem, ok := plan[0].(map[string]any)
-			if !ok || len(elem) != 1 {
-				t.Errorf("%s: step %v: plan element must carry exactly one verb, got %v", name, step["id"], plan[0])
+			if !ok {
+				t.Errorf("%s: step %v: plan element is not a mapping: %v", name, step["id"], plan[0])
 				continue
 			}
-			for kind, rawBody := range elem {
-				body, ok := rawBody.(map[string]any)
-				if !ok {
-					t.Errorf("%s: step %v: verb %q body is not a mapping", name, step["id"], kind)
-					continue
+			kind, body, ok := pipelinePlanVerb(elem)
+			if !ok {
+				t.Errorf("%s: step %v: plan element must carry exactly one intent keyword and one verb, got %v", name, step["id"], plan[0])
+				continue
+			}
+			verbs++
+			for _, knob := range reshapePipelineVerbKnobs[kind] {
+				if !declared[knob] {
+					continue // the entity declared no value — nothing to copy
 				}
-				verbs++
-				for _, knob := range reshapePipelineVerbKnobs[kind] {
-					if !declared[knob] {
-						continue // the entity declared no value — nothing to copy
-					}
-					if _, ok := body[knob]; !ok {
-						t.Errorf("%s: step %v (%s): verb body is missing the entity-level knob %q, so the lifted verb is NOT self-contained",
-							name, step["id"], kind, knob)
-					}
+				if _, ok := body[knob]; !ok {
+					t.Errorf("%s: step %v (%s): verb body is missing the entity-level knob %q, so the lifted verb is NOT self-contained",
+						name, step["id"], kind, knob)
 				}
 			}
 		}
@@ -531,10 +659,12 @@ func pipelineVerbBody(t *testing.T, doc, entity, stepID string) (string, map[str
 		if len(plan) != 1 {
 			t.Fatalf("step %q is not a verb-sugar step", stepID)
 		}
-		for kind, rawBody := range plan[0].(map[string]any) {
-			body, _ := rawBody.(map[string]any)
-			return kind, body
+		elem, _ := plan[0].(map[string]any)
+		kind, body, ok := pipelinePlanVerb(elem)
+		if !ok {
+			t.Fatalf("step %q: plan element is not `{<intent>: <label>, <verb>: {…}}`: %v", stepID, plan[0])
 		}
+		return kind, body
 	}
 	t.Fatalf("step %q not found in entity %q", stepID, entity)
 	return "", nil
@@ -559,8 +689,10 @@ func TestPipelineLobsterVerbKnobsDuplicated(t *testing.T) {
 	for _, rawStep := range pl["steps"].([]any) {
 		plan, _ := rawStep.(map[string]any)["plan"].([]any)
 		if len(plan) == 1 {
-			for kind := range plan[0].(map[string]any) {
-				seen[kind] = true
+			if elem, ok := plan[0].(map[string]any); ok {
+				if kind, _, ok := pipelinePlanVerb(elem); ok {
+					seen[kind] = true
+				}
 			}
 		}
 	}

@@ -46,6 +46,14 @@ import (
 // (and `run:` is not an object-verb form).
 var reshapePipelineVerbKinds = setOfWords("agent", "probe", "ade", "generate", "emit", "media", "gate")
 
+// reshapePipelineLiftedIntent is the INTENT keyword a lifted verb step opens with. The new
+// grammar's #Step arms are a CLOSED set (run/check/agent-run/agent-check/include —
+// spec.StepKeywords) and every plan step must carry exactly one of them; the verb key alone is
+// not an exec arm. `run` is the spelling plugin-pipeline's own bed uses for a lifted verb (its
+// `gate:`/`generate:`/`emit:` steps are all `- run: <label>` + the verb key), so it is the
+// producer's convention rather than a judgement about whether a given verb mutates.
+const reshapePipelineLiftedIntent = "run"
+
 // reshapePipelineVerbKnobs is the table of ENTITY-LEVEL (`pipeline:`-level) knobs whose value
 // each lifted verb body must carry a COPY of, so the lifted verb is SELF-CONTAINED. Today
 // these verb bodies read their knob off the RUN CONTEXT — the pipeline's own config — e.g.
@@ -289,7 +297,12 @@ func reshapePipelineBody(name string, b *yaml.Node) bool {
 	// 5. `$pr` referenced anywhere in the body ⇒ the new schema requires it DECLARED.
 	//    `calver`/`workdir` are engine-provided and are never declared here.
 	if reshapePipelineUsesRef(b, "${pr}") {
-		reshapePipelineEnsureArg(b, "pr", "the value bound per lane by --prs")
+		// The description names the surface that ACTUALLY binds the arg today. The retired
+		// executor's per-lane `--prs` binder was deleted with it (plugin-pipeline#32/#43) and
+		// has no successor yet, so documenting it here would be a claim about a flag no binary
+		// has: an arg reaches a run as a `--args-json` member and is exposed to the steps as an
+		// env/ref value (plugin-lobster engine.go mergeEnv).
+		reshapePipelineEnsureArg(b, "pr", "the pr value this run is invoked with (--args-json)")
 	}
 	return true
 }
@@ -418,7 +431,23 @@ func reshapePipelineVerbStage(name string, st *yaml.Node, kind string, knobs map
 		}
 		verb.Content = append(verb.Content, reshapePipelineScalarKey(knob), reshapePipelineCloneNode(val))
 	}
+	// A LIFTED VERB IS NOT ITS OWN EXEC ARM. The new plan grammar requires every step to open
+	// with one INTENT keyword (spec.StepKeywords: run/check/agent-run/agent-check/include) AND
+	// to carry the verb key beside it; a `plan: [{agent: {…}}]` element is rejected by the
+	// loader with `plan[0] has no intent keyword`, which is what this reshape used to emit into
+	// every migrated config (plugin-migrate#20). plugin-pipeline's own bed states the rule and
+	// spells it `- run: <label>` + `gate: {…}`, so `run` is the producer's own convention for a
+	// lifted verb rather than a per-kind semantic choice: the verb body IS the exec arm, and the
+	// intent keyword is the label that carries it.
+	//
+	// The label is the stage's OWN `id:` — the identifier the author already wrote — so nothing
+	// here invents prose; `id:` is optional on these stages, so the verb word is the fallback.
+	label := kind
+	if idVal != nil && idVal.Kind == yaml.ScalarNode && idVal.Value != "" {
+		label = idVal.Value
+	}
 	planElem := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+		reshapePipelineScalarKey(reshapePipelineLiftedIntent), reshapePipelineScalarValue(label),
 		reshapePipelineScalarKey(kind), verb,
 	}}
 	planSeq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{planElem}}
@@ -524,8 +553,14 @@ func reshapePipelineUsesRef(n *yaml.Node, needle string) bool {
 	return false
 }
 
-// reshapePipelineEnsureArg adds `args.<name>: {type: string, description: …}` if the body
-// does not already declare it. `args:` is inserted before `steps:` when absent.
+// reshapePipelineEnsureArg adds `args.<name>: {description: …}` if the body does not already
+// declare it. `args:` is inserted before `steps:` when absent.
+//
+// The entry carries ONLY `description:` because that is all `#TaskParamSpec` admits
+// (description/default/required — spec/schema/task.cue): an emitted `type: string` is an
+// unknown field against a CLOSED def and fails the load with `args.pr.type: field not allowed`
+// (plugin-migrate#20). The value is a string by construction — a pipeline arg is lowered to
+// `-p NAME="$NAME"` on the engine's command line — so there is no type left to write down.
 func reshapePipelineEnsureArg(b *yaml.Node, name, desc string) {
 	args := reshapeMapValue(b, "args")
 	if args != nil && args.Kind != yaml.MappingNode {
@@ -551,7 +586,6 @@ func reshapePipelineEnsureArg(b *yaml.Node, name, desc string) {
 	args.Content = append(args.Content,
 		reshapePipelineScalarKey(name),
 		&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
-			reshapePipelineScalarKey("type"), reshapePipelineScalarValue("string"),
 			reshapePipelineScalarKey("description"), reshapePipelineScalarValue(desc),
 		}})
 }
