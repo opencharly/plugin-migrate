@@ -509,10 +509,20 @@ func TestPipelineLobsterRealFixture(t *testing.T) {
 	// OLD grammar gone from every DATA line.
 	for _, gone := range []string{
 		"stages:", "skip_when", "kind:", "expect_exit",
-		"@oracle", "@gate", "@report", "$env.", "$pr", "$calver",
+		"@oracle", "@gate", "@report", "$env.",
 	} {
 		if strings.Contains(dataText, gone) {
 			t.Errorf("legacy token %q remains on a data line", gone)
+		}
+	}
+	// `$pr` / `$calver` need the BARE form asserted, not the substring: the new grammar
+	// spells the arg `${pr}` and the lane item `$pr.stdout`, and both contain `$pr`.
+	for _, tc := range []struct{ name, re string }{
+		{"$pr", `\$(pr)([^A-Za-z0-9_.-]|$)`},
+		{"$calver", `\$(calver)([^A-Za-z0-9_.-]|$)`},
+	} {
+		if regexp.MustCompile(tc.re).MatchString(dataText) {
+			t.Errorf("the retired BARE scalar ref %q remains on a data line", tc.name)
 		}
 	}
 	// NEW grammar present.
@@ -835,9 +845,345 @@ demo-pipeline:
 	if strings.Contains(s, "stages:") || strings.Contains(s, "kind: command") || strings.Contains(s, "expect_exit") {
 		t.Errorf("legacy grammar survived the full chain:\n%s", s)
 	}
-	for _, want := range []string{"steps:", "description: Migrated pipeline demo-pipeline.", "lanes: 4", "${pr}", "args:"} {
+	for _, want := range []string{"steps:", "description: Migrated pipeline demo-pipeline.", "batch_size: 4", "item_var: pr", "echo $pr.stdout", "args:"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("expected %q after the full chain:\n%s", want, s)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// the pooled fan-out arm
+// ---------------------------------------------------------------------------
+
+// pipelineLanesFixture is a retired pipeline whose stages are REF-INDEPENDENT — the shape the
+// fan-out arm can be emitted for. Two `kind: command` stages, no `@stage.out` between them, so
+// the migrated lane body satisfies the target grammar's loop-body rule (a loop body's sub-step
+// references are validated against the pipeline's TOP-LEVEL step ids only).
+const pipelineLanesFixture = `lanes-pipeline:
+    pipeline:
+        repo: acme/widget
+        concurrency: {lanes: 3}
+        stages:
+            - id: run-bed
+              kind: command
+              command: 'charly check run bed-$pr'
+              expect_exit: 0
+            - id: collect
+              kind: command
+              command: 'ls -t .check/bed-$pr | head -1'
+              expect_exit: 0
+`
+
+// pipelineLaneArms and pipelineSubStepArms are the TARGET grammar's exec arms, FROZEN here
+// for the reason pipelinePlanIntents is frozen (see the vocabulary note in the reshape): a
+// migration unit replays against arbitrarily old configs and must not read the live schema.
+// The FIRST set is the mutually exclusive arm list a step carries; the SECOND is the
+// NON-RECURSIVE subset a loop body's sub-step may carry (upstream lobster's own rule: no
+// nested parallel/for_each/lanes/input/approval/workflow inside a loop or branch).
+var (
+	pipelineLaneArms     = []string{"run", "pipeline", "workflow", "parallel", "for_each", "lanes", "input", "plan", "charly", "approval"}
+	pipelineSubStepArms  = map[string]bool{"run": true, "pipeline": true, "plan": true, "charly": true}
+	pipelineLoopKeys     = []string{"steps", "item_var", "index_var", "batch_size", "pause_ms"}
+	pipelineStepRefWhole = regexp.MustCompile(`^\$([A-Za-z0-9_-]+)\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)$`)
+)
+
+// pipelineLaneArmErrors is the LOAD GATE for the emitted fan-out arm: it applies the target
+// grammar's own rules to the EMITTED document and returns every violation. The rules are the
+// ones sdk/workflowkit.ValidatePipeline enforces for a `lanes:` step — exactly one exec arm,
+// a non-empty collection, a REQUIRED positive `batch_size`, no `pause_ms`, `item_var` ≠
+// `index_var`, a non-empty `steps:` body of non-recursive sub-steps, loop companions only
+// beside a loop arm, and a collection that names an EARLIER top-level step — expressed as a
+// frozen snapshot so this unit keeps compiling while a consumer's pinned sdk is older.
+//
+// It returns an error when the document carries NO lane arm at all: a reshape that goes back
+// to flattening the retired knob into `config:` must fail this gate, not silently pass it.
+func pipelineLaneArmErrors(t *testing.T, doc string) []string {
+	t.Helper()
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(doc), &root); err != nil {
+		t.Fatalf("emitted document is not parseable YAML: %v", err)
+	}
+	var errs []string
+	lanes := 0
+	for name, rawEntity := range root {
+		entity, ok := rawEntity.(map[string]any)
+		if !ok {
+			continue
+		}
+		pl, ok := entity["pipeline"].(map[string]any)
+		if !ok {
+			continue
+		}
+		steps, _ := pl["steps"].([]any)
+		declared := map[string]bool{}
+		for _, rawStep := range steps {
+			step, ok := rawStep.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := step["id"].(string)
+			where := fmt.Sprintf("%s: step %q", name, id)
+			var arms []string
+			for _, arm := range pipelineLaneArms {
+				if _, set := step[arm]; set {
+					arms = append(arms, arm)
+				}
+			}
+			collection, hasLanes := step["lanes"].(string)
+			if !hasLanes {
+				// companions without a loop arm are the stray-companion rule
+				for _, key := range pipelineLoopKeys {
+					if _, set := step[key]; set {
+						errs = append(errs, fmt.Sprintf("%s: %q only applies alongside for_each/lanes", where, key))
+					}
+				}
+				declared[id] = true
+				continue
+			}
+			lanes++
+			if len(arms) != 1 {
+				errs = append(errs, fmt.Sprintf("%s: %d execution arms set (%v), want exactly one", where, len(arms), arms))
+			}
+			if collection == "" {
+				errs = append(errs, fmt.Sprintf("%s: lanes is empty", where))
+			}
+			switch width := step["batch_size"].(type) {
+			case int:
+				if width < 1 {
+					errs = append(errs, fmt.Sprintf("%s: lanes requires batch_size >= 1 (the pool width)", where))
+				}
+			default:
+				errs = append(errs, fmt.Sprintf("%s: lanes requires batch_size >= 1 (the pool width), got %v", where, step["batch_size"]))
+			}
+			if _, set := step["pause_ms"]; set {
+				errs = append(errs, fmt.Sprintf("%s: lanes cannot define pause_ms", where))
+			}
+			if iv, _ := step["item_var"].(string); iv != "" {
+				if iv == fmt.Sprint(step["index_var"]) {
+					errs = append(errs, fmt.Sprintf("%s: item_var and index_var must differ", where))
+				}
+			}
+			if m := pipelineStepRefWhole.FindStringSubmatch(collection); m != nil && !declared[m[1]] {
+				errs = append(errs, fmt.Sprintf("%s: reference $%s.* names a step that is not declared earlier", where, m[1]))
+			}
+			body, _ := step["steps"].([]any)
+			if len(body) == 0 {
+				errs = append(errs, fmt.Sprintf("%s: for_each/lanes requires a non-empty steps list", where))
+			}
+			for _, rawSub := range body {
+				sub, ok := rawSub.(map[string]any)
+				if !ok {
+					errs = append(errs, fmt.Sprintf("%s: a sub-step is not a mapping", where))
+					continue
+				}
+				subArms := 0
+				for arm := range sub {
+					if arm == "id" || arm == "when" || arm == "stdin" || arm == "env" || arm == "cwd" || arm == "timeout_ms" || arm == "on_error" || arm == "retry" {
+						continue
+					}
+					if !pipelineSubStepArms[arm] {
+						errs = append(errs, fmt.Sprintf("%s: sub-step %v carries %q, which a loop body cannot hold", where, sub["id"], arm))
+					}
+					subArms++
+				}
+				if subArms != 1 {
+					errs = append(errs, fmt.Sprintf("%s: sub-step %v carries %d execution arms, want exactly one", where, sub["id"], subArms))
+				}
+			}
+			declared[id] = true
+		}
+	}
+	if lanes == 0 {
+		errs = append(errs, "the emitted document carries NO fan-out arm")
+	}
+	return errs
+}
+
+// pipelineEmittedMutation applies a textual edit to an emitted document. Each control below
+// must be a MUTATION of the emitted shape, so the gate is proved to measure the emission.
+func pipelineEmittedMutation(t *testing.T, doc, old, new string) string {
+	t.Helper()
+	if n := strings.Count(doc, old); n != 1 {
+		t.Fatalf("control mutation anchor %q occurs %d times in the emitted document, want exactly 1:\n%s", old, n, doc)
+	}
+	return strings.Replace(doc, old, new, 1)
+}
+
+// TestPipelineLobsterLanesArmEmitted — a retired `concurrency: {lanes: N}` becomes the pooled
+// fan-out arm: ONE lane step wrapping the whole migrated step list, the collection taken from
+// the run's `prs` arg, the width from the retired knob, and every retired `$pr` read rebound
+// to the lane's own item (never the arg template, which reads ARGS ONLY).
+func TestPipelineLobsterLanesArmEmitted(t *testing.T) {
+	out := pipelineLobsterMigrate(t, pipelineLanesFixture)
+
+	for _, want := range []string{
+		"- id: lane",
+		"lanes: ${prs}", // the collection is the run's argument list
+		"batch_size: 3", // the retired knob IS the pool width
+		"item_var: pr",  // the per-lane binding keeps the retired name
+		"$pr.stdout",    // the lane item, read through its step-result field
+		"charly check run bed-$pr.stdout",
+		"args:",
+		"the pr values this fan-out run is invoked with, as a JSON list (--args-json)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected the fan-out arm token %q in the emitted document:\n%s", want, out)
+		}
+	}
+	if strings.Contains(pipelineDataLines(out), "concurrency:") {
+		t.Errorf("the retired `concurrency:` key survived the migration:\n%s", out)
+	}
+	if strings.Contains(pipelineDataLines(out), "lanes: 3") {
+		t.Errorf("the width was flattened into `config:` instead of carried by the arm:\n%s", out)
+	}
+	// the arm wraps ONE step list: two top-level steps would run the body twice
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(out), &root); err != nil {
+		t.Fatal(err)
+	}
+	pl := root["lanes-pipeline"].(map[string]any)["pipeline"].(map[string]any)
+	steps := pl["steps"].([]any)
+	if len(steps) != 1 {
+		t.Fatalf("the emitted pipeline carries %d top-level steps, want 1 (the lane): %v", len(steps), steps)
+	}
+	lane := steps[0].(map[string]any)
+	if body, _ := lane["steps"].([]any); len(body) != 2 {
+		t.Errorf("the lane body carries %d stages, want the 2 migrated stages", len(body))
+	}
+}
+
+// TestPipelineLobsterLanesArmIsLoadable — THE load gate for the arm, with the controls that
+// make it a gate rather than a pass-through:
+//
+//   - the EMITTED document satisfies the target grammar's fan-out rules (the frozen
+//     snapshot of what sdk/workflowkit.ValidatePipeline enforces);
+//   - the PRE-CHANGE emission (the retired knob flattened into `config:`, no arm) FAILS the
+//     same gate — so a future reshape that stops emitting the arm fails here, not in a
+//     consumer;
+//   - two MUTATIONS of the emitted arm fail it — a lane step with no pool width, and a
+//     collection naming a step that is not declared earlier — so the gate is measured
+//     against the emission, not against "it parses".
+func TestPipelineLobsterLanesArmIsLoadable(t *testing.T) {
+	out := pipelineLobsterMigrate(t, pipelineLanesFixture)
+
+	if errs := pipelineLaneArmErrors(t, out); len(errs) != 0 {
+		t.Fatalf("the emitted fan-out document is NOT loadable: %v\n%s", errs, out)
+	}
+
+	// CONTROL 1 — the pre-change emission must FAIL. That shape still parses and still
+	// carries the knob, which is exactly why a gate keyed on "the document loads" would be
+	// vacuous; this gate is keyed on the arm being present and well-formed.
+	preChange := pipelineEmittedMutation(t, out, "batch_size: 3", "")
+	preChange = pipelineEmittedMutation(t, preChange, "lanes: ${prs}", "config:\n            lanes: 3")
+	if errs := pipelineLaneArmErrors(t, preChange); len(errs) == 0 {
+		t.Fatalf("the OLD emitted shape (knob flattened into `config:`, no arm) passed the load gate — the gate is not measuring the emission:\n%s", preChange)
+	}
+
+	// CONTROL 2 — mutations of the emitted arm must FAIL.
+	for _, tc := range []struct{ name, doc, want string }{
+		{"no pool width", pipelineEmittedMutation(t, out, "batch_size: 3", ""), "lanes requires batch_size >= 1"},
+		{
+			"collection names a later step",
+			pipelineEmittedMutation(t, out, "lanes: ${prs}", "lanes: $later.json.items"),
+			"reference $later.* names a step that is not declared earlier",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := pipelineLaneArmErrors(t, tc.doc)
+			if len(errs) == 0 {
+				t.Fatalf("the mutated arm passed the load gate — the gate is not measuring the emission")
+			}
+			joined := strings.Join(errs, "\n")
+			if !strings.Contains(joined, tc.want) {
+				t.Errorf("gate rejected the mutation for the wrong reason: %v (want %q)", errs, tc.want)
+			}
+		})
+	}
+}
+
+// TestPipelineLobsterLanesChainedBodyStaysLoadable — a stage graph whose stages reference
+// each other CANNOT be one lane body today: the target grammar validates a loop body's
+// sub-step refs against the pipeline's TOP-LEVEL ids, so the wrapper would be refused at load
+// (opencharly/sdk#441). The knob then keeps the one loadable home it has — the inert
+// `config:` map — and the document must still LOAD, because half a migration is worse than a
+// documented gap. plugin-migrate#23 records the un-restored fan-out.
+func TestPipelineLobsterLanesChainedBodyStaysLoadable(t *testing.T) {
+	const chained = `chained-pipeline:
+    pipeline:
+        concurrency: {lanes: 16}
+        stages:
+            - id: oracle
+              kind: command
+              command: 'echo $pr'
+            - id: render
+              kind: command
+              command: 'echo @oracle.out'
+`
+	out := pipelineLobsterMigrate(t, chained)
+	if strings.Contains(pipelineDataLines(out), "concurrency:") {
+		t.Errorf("the retired `concurrency:` key survived:\n%s", out)
+	}
+	if !strings.Contains(out, "lanes: 16") {
+		t.Errorf("a chained stage graph must keep the knob in `config:`, got:\n%s", out)
+	}
+	if strings.Contains(out, "item_var:") {
+		t.Errorf("a chained stage graph must NOT be wrapped in a lane step (the loader refuses it):\n%s", out)
+	}
+	// the whole point of the fallback: it LOADS. No arm, so the arm gate reports exactly that
+	// and nothing else.
+	for _, err := range pipelineLaneArmErrors(t, out) {
+		if !strings.Contains(err, "carries NO fan-out arm") {
+			t.Errorf("the chained-body fallback is not loadable: %s", err)
+		}
+	}
+}
+
+// TestPipelineLobsterLanesRealMatrixWraps — the REAL check-omarchy-accept-matrix entity (two
+// ref-independent command stages) is the one eval-omarchy pipeline whose fan-out translates
+// mechanically; eval-pr-plan is the one that cannot (its twelve stages chain). This pins
+// which half of that file the arm reaches, on the fixture copied verbatim from the consumer.
+func TestPipelineLobsterLanesRealMatrixWraps(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "eval-pr-plan.yml"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "charly.yml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runMigrations(&MigrateContext{Dir: dir, Out: io.Discard}, true); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(got)
+
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(out), &root); err != nil {
+		t.Fatal(err)
+	}
+	stepsOf := func(entity string) []any {
+		pl, ok := root[entity].(map[string]any)["pipeline"].(map[string]any)
+		if !ok {
+			t.Fatalf("entity %q missing", entity)
+		}
+		s, _ := pl["steps"].([]any)
+		return s
+	}
+	matrix := stepsOf("check-omarchy-accept-matrix")
+	if len(matrix) != 1 {
+		t.Fatalf("check-omarchy-accept-matrix carries %d top-level steps, want 1 (the lane)", len(matrix))
+	}
+	lane := matrix[0].(map[string]any)
+	if lane["lanes"] == nil || fmt.Sprint(lane["batch_size"]) != "16" {
+		t.Fatalf("check-omarchy-accept-matrix did not wrap: lanes=%v batch_size=%v", lane["lanes"], lane["batch_size"])
+	}
+	plan := stepsOf("eval-pr-plan")
+	if len(plan) < 2 || plan[0].(map[string]any)["lanes"] != nil {
+		t.Fatalf("eval-pr-plan must NOT be wrapped (its stages chain): %d top-level steps", len(plan))
 	}
 }

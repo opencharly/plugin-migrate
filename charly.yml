@@ -87,13 +87,13 @@ check-migrate-local:
               command:
                 command: 'd=$(mktemp -d); printf "discover:\n    - path: candy\n      recursive: true\n" > "$d/charly.yml"; printf "leftover:\n    group: {}\n" >> "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only >/dev/null 2>&1; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
                 in_container: false
-            - check: charly migrate rewrites the legacy kind-pipeline grammar into lobster steps syntax (stages→steps, kind-command→run, skip_when→inverted when, @stage.out→$stage.json.out), adds the required description, consolidates config, labels every lifted verb step with the `run:` intent keyword it emits (a bare `<verb>:` as a step key is the load failure this once shipped) plus the stage id as its label, declares a #TaskParamSpec-valid args pr entry, duplicates into each lifted verb body the entity-level knobs that verb reads (skills/llm/repo, media, report) so the lifted verb is self-contained on a plan with no pipeline config, and leaves @github candy refs + shell vars byte-identical
+            - check: charly migrate rewrites the legacy kind-pipeline grammar into lobster steps syntax (stages→steps, kind-command→run, skip_when→inverted when, @stage.out→$stage.json.out), adds the required description, consolidates config, labels every lifted verb step with the `run:` intent keyword it emits (a bare `<verb>:` as a step key is the load failure this once shipped) plus the stage id as its label, declares a #TaskParamSpec-valid args pr entry, duplicates into each lifted verb body the entity-level knobs that verb reads (skills/llm/repo, media, report) so the lifted verb is self-contained on a plan with no pipeline config, carries a retired `concurrency: {lanes: N}` onto the pooled fan-out arm (one `lanes: ${prs}` step with `batch_size: N`, `item_var: pr`, the whole migrated step list as its body, and every retired `$pr` read rebound to `$pr.stdout`) for a stage graph the target grammar can express, keeps that knob in `config:` for one it cannot (the matrix wraps, eval-pr-plan does not — its stages chain, opencharly/sdk#441), and leaves @github candy refs + shell vars byte-identical
               id: migrate-pipeline-v1
               exit_status: 0
               context:
                 - runtime
               command:
-                command: 'd=$(mktemp -d); cp candy/plugin-migrate/testdata/eval-pr-plan.yml "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; f="$d/charly.yml"; grep -vE "^[[:space:]]*#" "$f" | grep -qE "stages:|skip_when|kind:|expect_exit|@oracle|@gate|[$]env[.]|[$]pr|[$]calver" && rc=1; grep -qF "description: Migrated pipeline check-omarchy-accept-matrix." "$f" || rc=1; grep -qF "description: Migrated pipeline check-omarchy-accept-suite." "$f" || rc=1; grep -qF "description: Migrated pipeline eval-pr-plan." "$f" || rc=1; grep -qE "^[[:space:]]+steps:$" "$f" || rc=1; grep -qE "^[[:space:]]+- run: oracle$" "$f" || rc=1; test "$(grep -cE "^[[:space:]]+- run: " "$f")" = "12" || rc=1; grep -vE "^[[:space:]]*#" "$f" | grep -qE "^[[:space:]]+- (agent|probe|ade|generate|emit|media|gate):" && rc=1; grep -qF "the pr value this run is invoked with (--args-json)" "$f" || rc=1; grep -qF "bound per lane by --prs" "$f" && rc=1; grep -qE "^[[:space:]]+run: " "$f" || rc=1; grep -qF "lanes: 16" "$f" || rc=1; grep -qF "escalate_after: 5" "$f" || rc=1; grep -qE "[!][(][$]oracle[.]json[.]class ==" "$f" || rc=1; grep -qF "\${pr}" "$f" || rc=1; grep -qF "\${calver}" "$f" || rc=1; grep -qF "\$report.json.tests" "$f" || rc=1; grep -qF "\$report.bed_template" "$f" || rc=1; grep -vE "^[[:space:]]*#" "$f" | grep -qF "\$latest" || rc=1; grep -vE "^[[:space:]]*#" "$f" | grep -qF "\$b" || rc=1; test "$(grep -oE "@github\.com/[^ ]+" "$f" | sort -u | wc -l)" = "3" || rc=1; grep -qF "\$github" "$f" && rc=1; test "$(grep -cE "^[[:space:]]*skills:$" "$f")" = "5" || rc=1; test "$(grep -cE "^[[:space:]]*report:$" "$f")" = "4" || rc=1; test "$(grep -cF "repo: omacom/omarchy" "$f")" -ge "5" || rc=1; test "$(grep -cE "^[[:space:]]*media:$" "$f")" -ge "2" || rc=1; rm -rf "$d"; exit $rc'
+                command: 'd=$(mktemp -d); cp candy/plugin-migrate/testdata/eval-pr-plan.yml "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; f="$d/charly.yml"; grep -vE "^[[:space:]]*#" "$f" | grep -qE "stages:|skip_when|kind:|expect_exit|@oracle|@gate|[$]env[.]|[$]calver([^A-Za-z0-9_.-]|$)|[$]pr([^A-Za-z0-9_.-]|$)" && rc=1; grep -qF "description: Migrated pipeline check-omarchy-accept-matrix." "$f" || rc=1; grep -qF "description: Migrated pipeline check-omarchy-accept-suite." "$f" || rc=1; grep -qF "description: Migrated pipeline eval-pr-plan." "$f" || rc=1; grep -qE "^[[:space:]]+steps:$" "$f" || rc=1; grep -qE "^[[:space:]]+- run: oracle$" "$f" || rc=1; test "$(grep -cE "^[[:space:]]+- run: " "$f")" = "12" || rc=1; grep -vE "^[[:space:]]*#" "$f" | grep -qE "^[[:space:]]+- (agent|probe|ade|generate|emit|media|gate):" && rc=1; grep -qF "the pr value this run is invoked with (--args-json)" "$f" || rc=1; grep -qF "bound per lane by --prs" "$f" && rc=1; grep -qE "^[[:space:]]+run: " "$f" || rc=1; grep -qF "lanes: 16" "$f" || rc=1; grep -qF "batch_size: 16" "$f" || rc=1; grep -qF "lanes: \${prs}" "$f" || rc=1; grep -qF "item_var: pr" "$f" || rc=1; grep -qF "\$pr.stdout" "$f" || rc=1; grep -cF "the pr values this fan-out run is invoked with" "$f" | grep -qx 1 || rc=1; grep -qF "escalate_after: 5" "$f" || rc=1; grep -qE "[!][(][$]oracle[.]json[.]class ==" "$f" || rc=1; grep -qF "\${pr}" "$f" || rc=1; grep -qF "\${calver}" "$f" || rc=1; grep -qF "\$report.json.tests" "$f" || rc=1; grep -qF "\$report.bed_template" "$f" || rc=1; grep -vE "^[[:space:]]*#" "$f" | grep -qF "\$latest" || rc=1; grep -vE "^[[:space:]]*#" "$f" | grep -qF "\$b" || rc=1; test "$(grep -oE "@github\.com/[^ ]+" "$f" | sort -u | wc -l)" = "3" || rc=1; grep -qF "\$github" "$f" && rc=1; test "$(grep -cE "^[[:space:]]*skills:$" "$f")" = "5" || rc=1; test "$(grep -cE "^[[:space:]]*report:$" "$f")" = "4" || rc=1; test "$(grep -cF "repo: omacom/omarchy" "$f")" -ge "5" || rc=1; test "$(grep -cE "^[[:space:]]*media:$" "$f")" -ge "2" || rc=1; rm -rf "$d"; exit $rc'
                 in_container: false
             - check: a SECOND charly migrate on the already-migrated pipeline is a no-op (exit 0, "nothing to migrate") — the pipeline-lobster step is idempotent
               id: migrate-pipeline-idempotent
@@ -104,6 +104,63 @@ check-migrate-local:
                 - runtime
               command:
                 command: 'd=$(mktemp -d); cp candy/plugin-migrate/testdata/eval-pr-plan.yml "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only >/dev/null 2>&1; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
+                in_container: false
+            - check: 'the emitted fan-out arm LOADS — the migrated check-omarchy-accept-matrix (a retired `concurrency: {lanes: 16}` over two REF-INDEPENDENT stages) becomes ONE `lanes: ${prs}` step with `batch_size: 16`, `item_var: pr` and the whole stage list as its body, the retired key is gone, and `charly box validate` reports 0 warnings / 0 errors'
+              id: migrate-pipeline-lanes-loadgate-new
+              exit_status: 0
+              context:
+                - runtime
+              command:
+                command: |-
+                  set -eu
+                  d=$(mktemp -d)
+                  mkdir -p "$d/candy/pipe"
+                  { printf 'discover:\n    - path: candy\n      recursive: true\n'; cat candy/plugin-migrate/testdata/lanes-matrix.yml; } > "$d/charly.yml"
+                  printf 'pipe:\n  candy:\n    description: the pipeline front-end, by released ref\n    candy:\n      - "@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.294.1135"\n    plan:\n      - check: the front-end resolves\n        context: [build]\n        command: "true"\n' > "$d/candy/pipe/charly.yml"
+                  ${CHARLY_BIN} migrate --dir "$d" --project-only >/dev/null 2>&1
+                  grep -qF 'lanes: ${prs}' "$d/charly.yml" || { echo "the fan-out arm was not emitted" >&2; exit 1; }
+                  grep -qF 'batch_size: 16' "$d/charly.yml" || { echo "the pool width was not emitted" >&2; exit 1; }
+                  grep -qF 'item_var: pr' "$d/charly.yml" || { echo "the lane binding was not emitted" >&2; exit 1; }
+                  if grep -qE '^[[:space:]]*concurrency:' "$d/charly.yml"; then echo "the retired concurrency: key survived" >&2; exit 1; fi
+                  rc=0
+                  ${CHARLY_BIN} box validate --dir "$d" > "$d/out" 2>&1 || rc=1
+                  grep -q '0 errors' "$d/out" || rc=1
+                  grep -q '0 warnings' "$d/out" || rc=1
+                  [ "$rc" -eq 0 ] || cat "$d/out" >&2
+                  rm -rf "$d"
+                  exit $rc
+                in_container: false
+            - check: 'the load-gate NEGATIVE CONTROL — the SAME entity authored in the RETIRED grammar (the un-migrated fixture) must FAIL the same validate, naming `concurrency: field not allowed`; a control that passes would mean the gate measures nothing'
+              id: migrate-pipeline-lanes-loadgate-old
+              exit_status: 0
+              context:
+                - runtime
+              command:
+                command: |-
+                  set -eu
+                  d=$(mktemp -d)
+                  mkdir -p "$d/candy/pipe"
+                  { printf 'discover:\n    - path: candy\n      recursive: true\n'; cat candy/plugin-migrate/testdata/lanes-matrix.yml; } > "$d/charly.yml"
+                  printf 'pipe:\n  candy:\n    description: the pipeline front-end, by released ref\n    candy:\n      - "@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.294.1135"\n    plan:\n      - check: the front-end resolves\n        context: [build]\n        command: "true"\n' > "$d/candy/pipe/charly.yml"
+                  rc=0
+                  ${CHARLY_BIN} box validate --dir "$d" > "$d/out" 2>&1 || rc=$?
+                  # Every BAD path exits NON-ZERO here. An earlier version folded its own
+                  # verdict into $rc and then asserted [ "$rc" -ne 0 ], which is true on every
+                  # path — a control that could never fail (plugin-migrate#24 round 1).
+                  if [ "$rc" -eq 0 ]; then
+                    echo "the RETIRED concurrency: shape VALIDATED — the gate measures nothing" >&2
+                    cat "$d/out" >&2
+                    rm -rf "$d"
+                    exit 1
+                  fi
+                  if ! grep -q 'concurrency: field not allowed' "$d/out"; then
+                    echo "the control failed for the wrong reason" >&2
+                    cat "$d/out" >&2
+                    rm -rf "$d"
+                    exit 1
+                  fi
+                  rm -rf "$d"
+                  exit 0
                 in_container: false
             - check: charly migrate --dry-run reports the pipeline plan and leaves the legacy stages grammar untouched (exit 0, dry-run trailer, stages/skip_when still present)
               id: migrate-pipeline-dry-run
