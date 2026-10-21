@@ -149,27 +149,39 @@ var pipelinePlanIntents = map[string]bool{
 	"run": true, "check": true, "agent-run": true, "agent-check": true, "include": true,
 }
 
-// pipelinePlanVerb splits a migrated plan element into its verb kind and verb body. ok is false
-// unless the element carries exactly one intent keyword AND exactly one verb key.
-func pipelinePlanVerb(elem map[string]any) (string, map[string]any, bool) {
-	kind := ""
-	var body map[string]any
-	intents := 0
+// pipelinePlanElement is one migrated `plan:` element, split ONCE for every reader in this
+// file: the intent count (the loader demands exactly one), the single verb key that carries the
+// lifted body, and every non-intent key it found (so a diagnostic can name them).
+type pipelinePlanElement struct {
+	intents  int
+	verbKind string
+	verbBody map[string]any
+	verbKeys []string
+}
+
+// pipelinePlanVerb splits a migrated plan element `{<intent>: <label>, <verb>: {…}}`. It is the
+// ONE splitter: the knob walker, the verb-body lookup, the per-kind coverage guard and the
+// load-gate control all read through it, so none of them can disagree about what an element is.
+func pipelinePlanVerb(elem map[string]any) pipelinePlanElement {
+	var pe pipelinePlanElement
 	for k, v := range elem {
 		if pipelinePlanIntents[k] {
-			intents++
+			pe.intents++
 			continue
 		}
-		if kind != "" {
-			return "", nil, false // two verb keys — the loader allows at most one sugar key
+		pe.verbKeys = append(pe.verbKeys, k)
+		if len(pe.verbKeys) == 1 {
+			pe.verbKind, pe.verbBody = k, nil
+			pe.verbBody, _ = v.(map[string]any)
 		}
-		kind = k
-		body, _ = v.(map[string]any)
 	}
-	if intents != 1 || kind == "" {
-		return "", nil, false
-	}
-	return kind, body, true
+	return pe
+}
+
+// wellFormed reports whether the element carries exactly one intent keyword and exactly one verb
+// key — the shape the loader accepts.
+func (pe pipelinePlanElement) wellFormed() bool {
+	return pe.intents == 1 && len(pe.verbKeys) == 1
 }
 
 // pipelineLobsterMigrate runs the reshape over a fixture and returns the migrated document.
@@ -284,11 +296,9 @@ func TestPipelineLobsterGrammarRewrite(t *testing.T) {
 // test can run in this unit's tree while still failing the moment the emitted form stops
 // being loadable.
 func TestPipelineLobsterEmittedShapeIsLoadable(t *testing.T) {
-	// spec.StepKeywords, frozen on purpose: this file may not read the live registry.
-	intentKeywords := map[string]bool{
-		"run": true, "check": true, "agent-run": true, "agent-check": true, "include": true,
-	}
-	// #TaskParamSpec's closed field set (spec/schema/task.cue).
+	// #TaskParamSpec's closed field set (spec/schema/task.cue). The INTENT vocabulary is not
+	// redeclared here: pipelinePlanIntents + pipelinePlanVerb are the file's one definition.
+
 	taskParamSpecFields := map[string]bool{"description": true, "default": true, "required": true}
 
 	out := pipelineLobsterMigrate(t, pipelineLobsterFixture)
@@ -305,28 +315,20 @@ func TestPipelineLobsterEmittedShapeIsLoadable(t *testing.T) {
 				k, v := n.Content[i], n.Content[i+1]
 				switch {
 				case k.Value == "plan" && v.Kind == yaml.SequenceNode:
-					for idx, elem := range v.Content {
+					for idx, elemNode := range v.Content {
 						plans++
-						if elem.Kind != yaml.MappingNode {
-							t.Fatalf("%s.plan[%d] is not a mapping", path, idx)
+						var elem map[string]any
+						if err := elemNode.Decode(&elem); err != nil {
+							t.Fatalf("%s.plan[%d] is not a mapping: %v", path, idx, err)
 						}
-						intents := 0
-						verbKeys := []string{}
-						for j := 0; j+1 < len(elem.Content); j += 2 {
-							key := elem.Content[j].Value
-							if intentKeywords[key] {
-								intents++
-								continue
-							}
-							verbKeys = append(verbKeys, key)
-						}
-						if intents != 1 {
+						pe := pipelinePlanVerb(elem)
+						if pe.intents != 1 {
 							t.Errorf("%s.plan[%d] carries %d intent keywords, want exactly 1 (the loader rejects this with \"no intent keyword\") — keys %v",
-								path, idx, intents, verbKeys)
+								path, idx, pe.intents, pe.verbKeys)
 						}
-						if len(verbKeys) != 1 {
+						if len(pe.verbKeys) != 1 {
 							t.Errorf("%s.plan[%d] carries %d non-intent keys %v, want exactly 1 (the lifted verb)",
-								path, idx, len(verbKeys), verbKeys)
+								path, idx, len(pe.verbKeys), pe.verbKeys)
 						}
 					}
 				case k.Value == "args" && v.Kind == yaml.MappingNode:
@@ -617,11 +619,12 @@ func assertVerbKnobsSelfContained(t *testing.T, doc string) int {
 				t.Errorf("%s: step %v: plan element is not a mapping: %v", name, step["id"], plan[0])
 				continue
 			}
-			kind, body, ok := pipelinePlanVerb(elem)
-			if !ok {
+			pe := pipelinePlanVerb(elem)
+			if !pe.wellFormed() {
 				t.Errorf("%s: step %v: plan element must carry exactly one intent keyword and one verb, got %v", name, step["id"], plan[0])
 				continue
 			}
+			kind, body := pe.verbKind, pe.verbBody
 			verbs++
 			for _, knob := range reshapePipelineVerbKnobs[kind] {
 				if !declared[knob] {
@@ -660,11 +663,11 @@ func pipelineVerbBody(t *testing.T, doc, entity, stepID string) (string, map[str
 			t.Fatalf("step %q is not a verb-sugar step", stepID)
 		}
 		elem, _ := plan[0].(map[string]any)
-		kind, body, ok := pipelinePlanVerb(elem)
-		if !ok {
+		pe := pipelinePlanVerb(elem)
+		if !pe.wellFormed() {
 			t.Fatalf("step %q: plan element is not `{<intent>: <label>, <verb>: {…}}`: %v", stepID, plan[0])
 		}
-		return kind, body
+		return pe.verbKind, pe.verbBody
 	}
 	t.Fatalf("step %q not found in entity %q", stepID, entity)
 	return "", nil
@@ -690,8 +693,8 @@ func TestPipelineLobsterVerbKnobsDuplicated(t *testing.T) {
 		plan, _ := rawStep.(map[string]any)["plan"].([]any)
 		if len(plan) == 1 {
 			if elem, ok := plan[0].(map[string]any); ok {
-				if kind, _, ok := pipelinePlanVerb(elem); ok {
-					seen[kind] = true
+				if pe := pipelinePlanVerb(elem); pe.wellFormed() {
+					seen[pe.verbKind] = true
 				}
 			}
 		}
