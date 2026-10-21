@@ -3,6 +3,7 @@ package migrate
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -15,6 +16,38 @@ import (
 // `args:` declaration the new schema requires, and the duplication of the entity-level knobs
 // each lifted verb reads into that verb's own body (reshapePipelineVerbKnobs) so the lifted
 // verb is self-contained.
+//
+// THE POOLED FAN-OUT ARM. The retired executor's `concurrency: {lanes: N}` was the WHOLE
+// pipeline's worker-pool width over the run's PR list (the deleted `runBatch`: N goroutines
+// pulling items from `--prs`, each item bound as `$pr`, every stage run once per item, ANY
+// failed lane failing the run). The new grammar's equivalent is the loop ARM — a step
+// carrying `lanes: <collection>` + `batch_size: N` + `item_var` + a `steps:` body — so the
+// migration wraps the whole migrated step list in ONE lane step:
+//
+//	concurrency: {lanes: 16}            →   steps:
+//	                                           - id: lane
+//	                                             lanes: ${prs}
+//	                                             batch_size: 16
+//	                                             item_var: pr
+//	                                             steps: [<the migrated stages>]
+//
+// The collection is the run's `prs` ARG, not a seed step: `#WorkflowArgVal` admits a FLAT
+// LIST of strings (spec#262), `plugin-lobster`'s `resolveLoopItems` parses a templated
+// (non-ref) `lanes:` operand as JSON, and the arg reaches a `run:` body's `${…}` template
+// through `renderTemplateValue` (a non-scalar renders as JSON). So `--prs a b c` becomes
+// `--args-json '{"prs":["a","b","c"]}'` and the arm consumes it directly — no invented
+// intermediate step, and nothing written to disk. Inside the lane body a stage's retired
+// `$pr` becomes the lane item (`$pr.stdout`): `item_var` is installed as a SCOPED STEP
+// RESULT, and `${pr}` reads ARGS ONLY (refs.go: "`${…}` reads ARGS ONLY and never a step
+// result"), so the arg spelling would silently read the wrong thing per lane.
+//
+// The arm is emitted only where the TARGET GRAMMAR can express it: `workflowkit.
+// ValidatePipeline` validates a loop body's sub-step references against the pipeline's
+// TOP-LEVEL step ids, so a lane body whose stages reference each other is refused at load
+// (`reference $X.* names a step that is not declared earlier`) even though the engine runs
+// it (opencharly/sdk#441). For such a graph the knob is flattened into `config:` exactly as
+// before — the one loadable home left — and the un-restored fan-out is the finding recorded
+// on plugin-migrate#23, never a silent claim that the arm was emitted.
 //
 // WHY A RESHAPER HOOK, NOT THE DECLARATIVE OPS. None of the four generic ops can express
 // this step:
@@ -53,6 +86,36 @@ var reshapePipelineVerbKinds = setOfWords("agent", "probe", "ade", "generate", "
 // `gate:`/`generate:`/`emit:` steps are all `- run: <label>` + the verb key), so it is the
 // producer's convention rather than a judgement about whether a given verb mutates.
 const reshapePipelineLiftedIntent = "run"
+
+// The pooled fan-out arm's emitted vocabulary (see "THE POOLED FAN-OUT ARM" above). All
+// four are FROZEN snapshots of the target grammar this cutover writes into, exactly like
+// the verb-kind and intent vocabularies beside them.
+const (
+	// reshapePipelineLaneItemVar is the `item_var` a wrapped pipeline binds each of the
+	// run's PR-list values to. It is the retired model's own name for the per-lane value
+	// (`$pr`), so every rewritten stage ref reads the way the authored one did.
+	reshapePipelineLaneItemVar = "pr"
+	// reshapePipelineLaneListArg is the run ARG the lane's collection comes from — the
+	// replacement for the deleted `--prs` flag. A list value crosses the wire
+	// (`#WorkflowArgVal`, spec#262) and `resolveLoopItems` parses a templated operand as
+	// JSON, so this needs no seed step.
+	reshapePipelineLaneListArg = "prs"
+	// reshapePipelineLaneItemField is the step-result field a STRING lane item is read
+	// through. `createSyntheticStepResult` puts a string item in `stdout` (and only in
+	// `json` when the string HAPPENS to parse as JSON), so `.stdout` is the field that is
+	// correct for every value of a `#WorkflowArgVal` list.
+	reshapePipelineLaneItemField = "stdout"
+	// reshapePipelineLaneID is the wrapping step's id; reshapePipelineLaneStepID moves to
+	// `lane-2`, `lane-3`, … when a stage already claimed it.
+	reshapePipelineLaneID = "lane"
+)
+
+// reshapePipelineLanesKnob / reshapePipelineConcurrencyKey name the retired pair the arm
+// replaces. Frozen like everything else here.
+const (
+	reshapePipelineConcurrencyKey = "concurrency"
+	reshapePipelineLanesKey       = "lanes"
+)
 
 // reshapePipelineVerbKnobs is the table of ENTITY-LEVEL (`pipeline:`-level) knobs whose value
 // each lifted verb body must carry a COPY of, so the lifted verb is SELF-CONTAINED. Today
@@ -234,6 +297,13 @@ func reshapePipelineBody(name string, b *yaml.Node) bool {
 		}
 	}
 
+	// 1c. The retired `concurrency: {lanes: N}` knob: the pool width, and whether THIS stage
+	//     graph can be expressed as one lane body. Both answers must be taken before the body
+	//     is rebuilt, and the chaining answer is measured on the OLD grammar (where a stage
+	//     ref is `@<id>.<out>` — unambiguous, unlike the knob refs `$report.<knob>`, which
+	//     name a key of an entity-level block and are never rewritten).
+	lanesWidth, fanOut := reshapePipelineLanesPlan(name, b, stagesSeq, ids)
+
 	// 2. Reshape every stage element (the key is renamed to `steps:` below).
 	for i, st := range stagesSeq.Content {
 		stagesSeq.Content[i] = reshapePipelineStage(name, st, knobs)
@@ -256,13 +326,18 @@ func reshapePipelineBody(name string, b *yaml.Node) bool {
 				HeadComment: k.HeadComment, LineComment: k.LineComment, FootComment: k.FootComment,
 			}
 			stepsVal = v
-		case k.Value == "concurrency":
-			// `concurrency: {lanes: N}` flattens to `config: {lanes: N}`.
+		case k.Value == reshapePipelineConcurrencyKey:
 			if v.Kind != yaml.MappingNode {
 				panic(fmt.Sprintf("reshape-pipeline-lobster: pipeline %q: `concurrency:` must be a mapping", name))
 			}
-			config.Content = append(config.Content, v.Content...)
-			haveConfig = true
+			for j := 0; j+1 < len(v.Content); j += 2 {
+				ck, cv := v.Content[j], v.Content[j+1]
+				if ck.Value == reshapePipelineLanesKey && fanOut {
+					continue // the lane arm carries the width; a leftover copy would be inert
+				}
+				config.Content = append(config.Content, ck, cv)
+				haveConfig = true
+			}
 		case k.Value == "config":
 			if v.Kind == yaml.MappingNode {
 				config.Content = append(config.Content, v.Content...)
@@ -293,6 +368,16 @@ func reshapePipelineBody(name string, b *yaml.Node) bool {
 	// 4. Rewrite refs uniformly across every string scalar in the body (values AND keys —
 	//    a key can carry a ref too, and a ref in a key must be rewritten the same way).
 	reshapePipelineRewriteRefs(b, ids)
+
+	// 4b. Wrap the migrated steps in the pooled fan-out arm. This runs AFTER the ref rewrite
+	//     (so the item rebind sees the `$…` forms the rewrite just produced) and BEFORE the
+	//     args pass (so a `$pr.<field>` left in the lane body is not mistaken for a `${pr}`
+	//     arg reference). See "THE POOLED FAN-OUT ARM" in the file header.
+	if fanOut {
+		reshapePipelineWrapLanes(name, b, stepsVal, lanesWidth, ids)
+		reshapePipelineEnsureArg(b, reshapePipelineLaneListArg,
+			"the pr values this fan-out run is invoked with, as a JSON list (--args-json)")
+	}
 
 	// 5. `$pr` referenced anywhere in the body ⇒ the new schema requires it DECLARED.
 	//    `calver`/`workdir` are engine-provided and are never declared here.
@@ -605,4 +690,160 @@ func reshapePipelineStageIDText(st *yaml.Node) string {
 		return `id "` + idv.Value + `"`
 	}
 	return "(no id)"
+}
+
+// ---------------------------------------------------------------------------
+// the pooled fan-out arm (see "THE POOLED FAN-OUT ARM" in the file header)
+// ---------------------------------------------------------------------------
+
+// reshapePipelineLanesPlan reads the retired `concurrency: {lanes: N}` knob off a pipeline
+// body and decides whether THIS stage graph can be expressed as one lane body. It returns
+// the pool width (0 when the knob is absent, i.e. "no fan-out") and whether to emit the arm.
+//
+// The width is faithful to the deleted `runBatch`, which clamped `lanes < 1` to 1 rather
+// than refusing: the new arm's own gate REQUIRES `batch_size >= 1`, so an authored 0 has to
+// arrive as 1 or the migrated document would not load for a knob the executor accepted.
+//
+// The arm is emitted only when `workflowkit.ValidatePipeline` accepts the resulting lane
+// body. It validates a loop body's sub-step references against the pipeline's TOP-LEVEL step
+// ids, so a body whose stages read each other is refused at load even though the engine runs
+// it (opencharly/sdk#441). In that case the knob stays where the one loadable home for it is
+// — flattened into `config:` — and plugin-migrate#23 records the un-restored fan-out.
+func reshapePipelineLanesPlan(name string, b, stagesSeq *yaml.Node, ids map[string]bool) (int, bool) {
+	width := reshapePipelineLanesWidth(name, b)
+	if width == 0 {
+		return 0, false
+	}
+	if chained := reshapePipelineChainedStageRef(stagesSeq, ids); chained != "" {
+		return width, false
+	}
+	return width, true
+}
+
+// reshapePipelineLanesWidth reads `concurrency.lanes` as a pool width, or 0 when the body
+// carries no `concurrency:` at all.
+func reshapePipelineLanesWidth(name string, b *yaml.Node) int {
+	conc := reshapeMapValue(b, reshapePipelineConcurrencyKey)
+	if conc == nil {
+		return 0
+	}
+	if conc.Kind != yaml.MappingNode {
+		panic(fmt.Sprintf("reshape-pipeline-lobster: pipeline %q: `concurrency:` must be a mapping", name))
+	}
+	lanesNode := reshapeMapValue(conc, reshapePipelineLanesKey)
+	if lanesNode == nil {
+		return 0
+	}
+	if lanesNode.Kind != yaml.ScalarNode {
+		panic(fmt.Sprintf("reshape-pipeline-lobster: pipeline %q: `concurrency.lanes:` must be a scalar integer", name))
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(lanesNode.Value))
+	if err != nil {
+		panic(fmt.Sprintf("reshape-pipeline-lobster: pipeline %q: `concurrency.lanes: %s` is not an integer", name, lanesNode.Value))
+	}
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// reshapePipelineChainedStageRef reports whether any stage of the entity references ANOTHER
+// stage (`@<id>.<out>`), returning that stage id, or "" when the stages are independent.
+//
+// Measured BEFORE the ref rewrite, where a stage reference is unambiguously the `@` form:
+// the `$` form that also looks like `$<id>.<path>` — `$report.bed_template` — is a KNOB
+// reference naming a key of an entity-level block, never a stage, and rewriting or
+// classing it as a stage ref is the corruption TestPipelineLobsterDoesNotCorruptReportRef
+// exists to prevent.
+func reshapePipelineChainedStageRef(n *yaml.Node, ids map[string]bool) string {
+	if n == nil {
+		return ""
+	}
+	if n.Kind == yaml.ScalarNode {
+		if n.Tag != "" && n.Tag != "!!str" {
+			return ""
+		}
+		for _, m := range reshapePipelineOldStageRefRe.FindAllStringSubmatch(n.Value, -1) {
+			if ids[m[1]] {
+				return m[1]
+			}
+		}
+		return ""
+	}
+	for _, c := range n.Content {
+		if ref := reshapePipelineChainedStageRef(c, ids); ref != "" {
+			return ref
+		}
+	}
+	return ""
+}
+
+// reshapePipelineWrapLanes replaces the body's `steps:` value with ONE lane step carrying
+// the migrated steps as its body, and rebinds the body's retired `$pr` reads to that lane's
+// item. `ids` is the stage-id set the item name must not collide with.
+func reshapePipelineWrapLanes(name string, b, stagesSeq *yaml.Node, width int, ids map[string]bool) {
+	itemVar := reshapePipelineFreeID(ids, reshapePipelineLaneItemVar)
+	laneID := reshapePipelineFreeID(ids, reshapePipelineLaneID)
+	// The per-lane value is a SCOPED STEP RESULT, and `${…}` reads ARGS ONLY (refs.go), so a
+	// stage inside the lane must read the item through the ref form. `.stdout` is the field a
+	// string item lands in (createSyntheticStepResult), which is what a `#WorkflowArgVal` list
+	// holds.
+	reshapePipelineRebindItemRefs(stagesSeq, itemVar)
+	laneStep := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+		reshapePipelineScalarKey("id"), reshapePipelineScalarValue(laneID),
+		reshapePipelineScalarKey(reshapePipelineLanesKey),
+		reshapePipelineScalarValue("${" + reshapePipelineLaneListArg + "}"),
+		reshapePipelineScalarKey("batch_size"), reshapePipelineIntValue(width),
+		reshapePipelineScalarKey("item_var"), reshapePipelineScalarValue(itemVar),
+		reshapePipelineScalarKey("steps"), stagesSeq,
+	}}
+	wrapped := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{laneStep}}
+	for i := 0; i+1 < len(b.Content); i += 2 {
+		if b.Content[i].Value == "steps" {
+			b.Content[i+1] = wrapped
+			return
+		}
+	}
+	panic(fmt.Sprintf("reshape-pipeline-lobster: pipeline %q: no `steps:` key to wrap", name))
+}
+
+// reshapePipelineRebindItemRefs rewrites every `${pr}` inside a lane body to the lane's own
+// item ref (`$<itemVar>.stdout`). `${prs}` is untouched: the replacement is the exact braced
+// token, so the list arg the arm reads cannot be rewritten into an item read.
+func reshapePipelineRebindItemRefs(n *yaml.Node, itemVar string) {
+	if n == nil {
+		return
+	}
+	if n.Kind == yaml.ScalarNode {
+		if n.Tag == "" || n.Tag == "!!str" {
+			n.Value = strings.ReplaceAll(n.Value,
+				"${"+reshapePipelineLaneItemVar+"}",
+				"$"+itemVar+"."+reshapePipelineLaneItemField)
+		}
+		return
+	}
+	for _, c := range n.Content {
+		reshapePipelineRebindItemRefs(c, itemVar)
+	}
+}
+
+// reshapePipelineFreeID returns `want`, or `want-2`, `want-3`, … when a stage already
+// claimed it — step ids are unique across a pipeline (ValidatePipeline), so a generated id
+// must not collide with an authored one.
+func reshapePipelineFreeID(taken map[string]bool, want string) string {
+	if !taken[want] {
+		return want
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", want, i)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+}
+
+// reshapePipelineIntValue builds a plain `!!int` node (a width must not be emitted as a
+// string: `batch_size` is `int & >0`).
+func reshapePipelineIntValue(v int) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(v)}
 }

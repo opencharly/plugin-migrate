@@ -1,0 +1,28 @@
+# The REAL legacy-grammar `check-omarchy-accept-matrix` entity text, copied verbatim from
+# eval-omarchy/charly.yml (READ-ONLY source; it is another repo's submodule). Its TWO stages
+# are REF-INDEPENDENT (`$pr`/`$calver` only, no `@stage.out` between them), which is the
+# shape the pooled fan-out arm can be emitted for — so `charly migrate` translates its
+# retired `concurrency: {lanes: 16}` into the arm, and the check-migrate-local bed proves the
+# result LOADS (and that the retired spelling does not). Held as test DATA — NOT a scanned
+# candy manifest (testdata/ is skipped by the file walk).
+check-omarchy-accept-matrix:
+    pipeline:
+        concurrency: {lanes: 16}
+        stages:
+            - id: bed
+              kind: command
+              command: 'charly check run check-omarchy-accept-$pr'
+              expect_exit: 0
+            - id: media
+              kind: command
+              # VERIFY-ONLY (the G-wave direct-write cutover): the bed's
+              # rec-wrap steps land artifacts DIRECTLY in
+              # media/<calver>/<bed>/, with no staging and no copy; this
+              # stage derives {bed} from the pipeline's $pr (the SAME short
+              # name bedShortName yields: check-omarchy-accept-<fn> → <fn>)
+              # and {calver} from the newest run dir, then delegates the
+              # whole 5-artifact min-size assertion to scripts/verify-media.sh
+              # — the ONE verify implementation (R3), shared by the matrix
+              # media stage and the suite aggregate stage alike.
+              command: 'latest=$(ls -t .check/check-omarchy-accept-$pr 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | head -1); [ -n "$latest" ] || exit 1; bash scripts/verify-media.sh $pr $latest'
+              expect_exit: 0
