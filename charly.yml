@@ -144,10 +144,23 @@ check-migrate-local:
                   printf 'pipe:\n  candy:\n    description: the pipeline front-end, by released ref\n    candy:\n      - "@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.294.1135"\n    plan:\n      - check: the front-end resolves\n        context: [build]\n        command: "true"\n' > "$d/candy/pipe/charly.yml"
                   rc=0
                   ${CHARLY_BIN} box validate --dir "$d" > "$d/out" 2>&1 || rc=$?
-                  if [ "$rc" -eq 0 ]; then echo "the RETIRED concurrency: shape VALIDATED — the control is vacuous" >&2; rc=1; fi
-                  grep -q 'concurrency: field not allowed' "$d/out" || { echo "the control failed for the wrong reason" >&2; cat "$d/out" >&2; rc=1; }
+                  # Every BAD path exits NON-ZERO here. An earlier version folded its own
+                  # verdict into $rc and then asserted [ "$rc" -ne 0 ], which is true on every
+                  # path — a control that could never fail (plugin-migrate#24 round 1).
+                  if [ "$rc" -eq 0 ]; then
+                    echo "the RETIRED concurrency: shape VALIDATED — the gate measures nothing" >&2
+                    cat "$d/out" >&2
+                    rm -rf "$d"
+                    exit 1
+                  fi
+                  if ! grep -q 'concurrency: field not allowed' "$d/out"; then
+                    echo "the control failed for the wrong reason" >&2
+                    cat "$d/out" >&2
+                    rm -rf "$d"
+                    exit 1
+                  fi
                   rm -rf "$d"
-                  [ "$rc" -ne 0 ]
+                  exit 0
                 in_container: false
             - check: charly migrate --dry-run reports the pipeline plan and leaves the legacy stages grammar untouched (exit 0, dry-run trailer, stages/skip_when still present)
               id: migrate-pipeline-dry-run
