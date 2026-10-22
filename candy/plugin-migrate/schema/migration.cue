@@ -15,7 +15,16 @@
 // declarative ops OR a named Go escape-hatch hook.
 #Migration: {
 	name:          string        // short label for --dry-run / progress
-	touches_host?: bool | *false // also rewrite the per-host overlay?
+	touches_host?: bool | *false // also rewrite a per-host file?
+	// host_config selects WHICH per-host file a touches_host step rewrites. The two
+	// files are DIFFERENT types and must never be conflated:
+	//   overlay        — ~/.config/charly/charly.yml (spec.DeployConfig: deploy/sidecar/
+	//                    cache/ledger/system; no engine field);
+	//   runtime_config — ~/.config/charly/config.yml (hostenv.RuntimeConfig: engine/
+	//                    run_mode/bind_address/vm/…).
+	// Only meaningful with touches_host and ignored otherwise. Default overlay keeps
+	// every pre-existing host step on the file it was authored against.
+	host_config?: *"overlay" | "runtime_config"
 	ops?: [...#MigrationOp]      // declarative ops, applied in order (mutually exclusive with apply)
 	apply?: string               // named Go hook for a structural reshape (mutually exclusive with ops)
 } @go(-)

@@ -98,19 +98,16 @@ func TestMigrationTable_K8sToKubernetes(t *testing.T) {
 	}
 }
 
-// TestMigrationTable_PodmanJobsToStageParallelism: the LAST (newest) entry carries
-// the build-speed inner-knob rename — `podman_jobs`/`podman_jobs_cap` →
+// TestMigrationTable_PodmanJobsToStageParallelism: the table carries the build-speed
+// inner-knob rename — `podman_jobs`/`podman_jobs_cap` →
 // `stage_parallelism`/`stage_parallelism_cap` — as two ORDERED rename_key ops over
 // the whole document, and it is NOT touches_host: the per-host overlay is a
 // RuntimeConfig and carries no build defaults, so a host-touching flag here would
 // only make remote-cache auto-migration skip a PROJECT key.
 func TestMigrationTable_PodmanJobsToStageParallelism(t *testing.T) {
-	if len(migrationTable) == 0 {
-		t.Fatal("migration table is empty")
-	}
-	m := migrationTable[len(migrationTable)-1]
-	if m.Name != "podman-jobs-to-stage-parallelism" || len(m.Ops) != 2 {
-		t.Fatalf("unexpected last table entry: %+v", m)
+	m := findMigration(t, "podman-jobs-to-stage-parallelism")
+	if len(m.Ops) != 2 {
+		t.Fatalf("unexpected table entry: %+v", m)
 	}
 	if m.TouchesHost {
 		t.Error("the step renames a PROJECT key; touches_host would make remote-cache auto-migration skip it")
@@ -141,10 +138,7 @@ func TestMigrationTable_PodmanJobsToStageParallelism(t *testing.T) {
 // own name. This is the assertion that fails if the step is ever "improved" into a
 // fold, and it pins the renamed key's value AND its inline comment.
 func TestPodmanJobsToStageParallelism_KeepsTheOuterKnob(t *testing.T) {
-	m := migrationTable[len(migrationTable)-1]
-	if m.Name != "podman-jobs-to-stage-parallelism" {
-		t.Fatalf("last entry is %q, expected the rename step", m.Name)
-	}
+	m := findMigration(t, "podman-jobs-to-stage-parallelism")
 	in := "defaults:\n  jobs: 4\n  podman_jobs: 0 # 0 = auto\n  podman_jobs_cap: 8\n"
 	out, changed := applyTransform(t, m, in)
 	if !changed {
@@ -348,6 +342,20 @@ func writeRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// findMigration returns the table entry with the given name. The table is append-only,
+// so tests locate an entry by NAME rather than by a hard-coded index or "last entry"
+// (a positional assertion is a change-detector that fails on every legitimate append).
+func findMigration(t *testing.T, name string) migration {
+	t.Helper()
+	for _, m := range migrationTable {
+		if m.Name == name {
+			return m
+		}
+	}
+	t.Fatalf("migration table has no entry named %q", name)
+	return migration{}
 }
 
 // TestRunMigrations_AlreadyCurrentNoOp: a document with no old shapes and no

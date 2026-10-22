@@ -220,4 +220,39 @@ migrations: [
 			{op: "rename_key", from: "podman_jobs_cap", to: "stage_parallelism_cap", scope: "any"},
 		]
 	},
+	{
+		name: "engine-word-containerd"
+		// THE PROJECT ENGINE WORD. spec#266 deleted `nerdctl` from #EngineName — the
+		// CLOSED vocabulary is now podman | docker | containerd — and #EngineBinaries
+		// maps the WORD containerd to the CLI binary `nerdctl`. The project surface
+		// authors `engine:` as a SCALAR #EngineName on #Deploy / #Candy / #Kindcluster,
+		// so ONE remap_scalar covers every occurrence at any depth (deploy nodes,
+		// candy bodies, cluster templates). A scalar remap can never touch the HOST
+		// runtime config's mapping form `engine: {run: …}` — that is the next step.
+		//
+		// NOT touches_host: this step rewrites PROJECT keys only. Marking it
+		// host-touching would make remote-cache auto-migration SKIP it and leave every
+		// cached project document carrying the retired word, while sweeping nothing
+		// extra on the overlay (a scalar op cannot match a mapping value).
+		ops: [
+			{op: "remap_scalar", key: "engine", from: "nerdctl", to: "containerd"},
+		]
+	},
+	{
+		name: "engine-run-word-containerd"
+		// THE HOST ENGINE WORD lives in the per-host RUNTIME CONFIG
+		// (~/.config/charly/config.yml, hostenv.RuntimeConfig), NOT in the deploy overlay
+		// (~/.config/charly/charly.yml, spec.DeployConfig — it has no engine field), so
+		// this step selects that surface with host_config: "runtime_config". Its authored
+		// shape is a MAPPING — `engine: {run: nerdctl, rootful: …}` (hostenv.EngineConfig)
+		// — and the op vocabulary has NO parent-path predicate: remap_scalar can key on
+		// `run` but cannot require it to sit under `engine:`, and a document-wide
+		// `run: nerdctl` remap would rewrite an unrelated scalar. So the exact nested path
+		// is a Go reshaper hook (reshape_engine_word.go). touches_host so full mode sweeps
+		// it and remote-cache auto-migration skips it (host state is never the cache's to
+		// mutate).
+		touches_host: true
+		host_config:  "runtime_config"
+		apply:        "remapEngineRunWord"
+	},
 ]

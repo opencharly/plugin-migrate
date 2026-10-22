@@ -9,6 +9,7 @@ import (
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
+	"github.com/opencharly/spec/hostenv"
 )
 
 // command.go — the `charly migrate` CLI grammar this plugin owns. runMigrateCLI backs
@@ -21,7 +22,7 @@ import (
 // MigrateCmd is the `charly migrate` flag set.
 type MigrateCmd struct {
 	DryRun      bool   `name:"dry-run" help:"Print every change migrate would make without touching the filesystem"`
-	ProjectOnly bool   `name:"project-only" help:"Migrate only the project dir, skipping the per-host deploy overlay (the remote-cache auto-migration path)"`
+	ProjectOnly bool   `name:"project-only" help:"Migrate only the project dir, skipping both per-host files (the remote-cache auto-migration path)"`
 	Quiet       bool   `name:"quiet" help:"Suppress progress output (the auto-migration path)"`
 	Dir         string `name:"dir" help:"Project directory holding charly.yml (default: the current working directory)"`
 }
@@ -46,15 +47,21 @@ func runMigrateCLI(args []string) error {
 	if cmd.Quiet {
 		out = io.Discard
 	}
-	// project-only skips the per-host overlay entirely (never resolves DeployConfigPath); full
-	// mode resolves the overlay so an operator `charly migrate` brings both up to head.
+	// project-only skips every per-host file entirely (never resolves their paths); full
+	// mode resolves BOTH so an operator `charly migrate` brings the deploy overlay AND the
+	// runtime config up to head. The two are different shapes — a step's host_config
+	// decides which one its transform runs against.
 	hostDeployPath := ""
+	hostRuntimePath := ""
 	if !cmd.ProjectOnly {
 		if hostDeployPath, err = kit.DefaultDeployConfigPath(); err != nil {
 			return err
 		}
+		if hostRuntimePath, err = hostenv.RuntimeConfigPath(); err != nil {
+			return err
+		}
 	}
-	ctx := &MigrateContext{Dir: dir, HostDeployPath: hostDeployPath, DryRun: cmd.DryRun, Out: out}
+	ctx := &MigrateContext{Dir: dir, HostDeployPath: hostDeployPath, HostRuntimePath: hostRuntimePath, DryRun: cmd.DryRun, Out: out}
 	if _, err := runMigrations(ctx, cmd.ProjectOnly); err != nil {
 		return err
 	}
