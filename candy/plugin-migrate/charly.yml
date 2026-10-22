@@ -41,3 +41,16 @@ plugin-migrate:
               context:
                 - build
               command: "true"
+
+# The `migrate` skill, authored beside the command it documents.
+# ROUTING-ONLY: name/family/owner plus the `triggers:` that generate its DISPATCHER.md
+# row — the prose is `.agents/skills/migrate/SKILL.md` at this repo's root, never an inline
+# `description:`/`content:` (an inline body that disagrees with its file is a hard error in
+# the marketplace generator).
+migrate-skill:
+    skill:
+        name: migrate
+        family: build
+        owner: plugin-migrate
+        triggers:
+            - "`charly migrate` / schema migration / legacy config shape / migration table / adding a migration step"
