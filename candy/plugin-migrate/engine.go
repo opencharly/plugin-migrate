@@ -68,8 +68,12 @@ var migrationsCUE []byte
 type migration struct {
 	Name        string
 	TouchesHost bool
-	Ops         []migrationOp
-	Apply       string // names a goHooks entry (the structural-reshape escape hatch)
+	// HostConfig selects the per-host file a TouchesHost step rewrites: "overlay"
+	// (the default — spec.DeployConfig at ~/.config/charly/charly.yml) or
+	// "runtime_config" (hostenv.RuntimeConfig at ~/.config/charly/config.yml).
+	HostConfig string
+	Ops        []migrationOp
+	Apply      string // names a goHooks entry (the structural-reshape escape hatch)
 }
 
 // migrationOp is one declarative op. The relevant fields depend on Op (validated
@@ -101,6 +105,7 @@ var goHooks = map[string]func(*yaml.Node) bool{
 	"rekeyLegacyVMOverlay":    rekeyLegacyVMOverlay,    // per-host overlay legacy vm:<identity> deploy keys → drop-on-twin / hard-error (reshape_rekey_vm_overlay.go)
 	"reshapePipelineLobster":  reshapePipelineLobster,  // legacy kind:pipeline stages: grammar → lobster steps:/verb-sugar grammar (reshape_pipeline_lobster.go)
 	"retireEmptyGroupNode":    retireEmptyGroupNode,    // barren `group:` node with nothing to promote → retired (reshape_retire_empty_group.go)
+	"remapEngineRunWord":      remapEngineRunWord,      // host `engine: {run: nerdctl}` → `{run: containerd}` direct-child remap (reshape_engine_word.go)
 }
 
 // migrationTable is the validated, declaration-ordered step list, loaded once at
@@ -137,6 +142,7 @@ func loadMigrationTable() []migration {
 		var raw struct {
 			Name        string        `json:"name"`
 			TouchesHost bool          `json:"touches_host"`
+			HostConfig  string        `json:"host_config"`
 			Ops         []migrationOp `json:"ops"`
 			Apply       string        `json:"apply"`
 		}
@@ -154,15 +160,22 @@ func loadMigrationTable() []migration {
 				panic(fmt.Sprintf("migrations.cue: step %q names unknown Go hook %q (register it in goHooks)", raw.Name, raw.Apply))
 			}
 		}
-		out = append(out, migration{Name: raw.Name, TouchesHost: raw.TouchesHost, Ops: raw.Ops, Apply: raw.Apply})
+		if raw.HostConfig == "" {
+			raw.HostConfig = "overlay" // CUE default, applied here too for a direct struct decode
+		}
+		if !raw.TouchesHost && raw.HostConfig != "overlay" {
+			panic(fmt.Sprintf("migrations.cue: step %q sets host_config=%q without touches_host — a project-only step has no per-host file", raw.Name, raw.HostConfig))
+		}
+		out = append(out, migration{Name: raw.Name, TouchesHost: raw.TouchesHost, HostConfig: raw.HostConfig, Ops: raw.Ops, Apply: raw.Apply})
 	}
 	return out
 }
 
 // runMigrations applies EVERY table step in declaration order to the project files
-// (and, unless projectOnly, to the per-host overlay for touches_host steps), then runs
-// the universal strip-version-stamp step. Each step is idempotent, so running the whole
-// set is a no-op on an already-current file. Returns whether anything changed.
+// (and, unless projectOnly, to the per-host file a touches_host step names via
+// host_config), then runs the universal strip-version-stamp step. Each step is
+// idempotent, so running the whole set is a no-op on an already-current file. Returns
+// whether anything changed.
 func runMigrations(ctx *MigrateContext, projectOnly bool) (bool, error) {
 	if ctx == nil {
 		return false, errors.New("migrate: nil context")
@@ -193,7 +206,12 @@ func runMigrations(ctx *MigrateContext, projectOnly bool) (bool, error) {
 		}
 		hostChanged := false
 		if m.TouchesHost && !projectOnly {
-			hostChanged, ferr = migrateHostOverlayDoc(ctx, transform)
+			switch m.HostConfig {
+			case "runtime_config":
+				hostChanged, ferr = migrateHostRuntimeConfigDoc(ctx, transform)
+			default: // "overlay" — the pre-existing host surface
+				hostChanged, ferr = migrateHostOverlayDoc(ctx, transform)
+			}
 			if ferr != nil {
 				return len(applied) > 0, ferr
 			}
@@ -330,14 +348,7 @@ func applyOpToMapping(m *yaml.Node, op migrationOp) bool {
 			}
 		}
 	case "remap_scalar":
-		for i := 0; i+1 < len(m.Content); i += 2 {
-			if m.Content[i].Value == op.Key {
-				if v := m.Content[i+1]; v.Kind == yaml.ScalarNode && v.Value == op.From {
-					v.Value = op.To
-					return true
-				}
-			}
-		}
+		return remapScalarDirectChild(m, op.Key, op.From, op.To)
 	case "move_key":
 		from := childMapping(m, op.FromParent)
 		to := childMapping(m, op.ToParent)
@@ -383,6 +394,27 @@ func mappingHasKey(m *yaml.Node, key string) bool {
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		if m.Content[i].Value == key {
 			return true
+		}
+	}
+	return false
+}
+
+// remapScalarDirectChild rewrites the scalar VALUE of a DIRECT child key from → to on
+// mapping m, returning whether it changed anything. It is the ONE implementation of the
+// declarative `remap_scalar` arm, shared with the apply: hooks that need the same
+// transform at a path the op vocabulary cannot express (remapEngineRunWord). Only the
+// immediate mapping is inspected; nested mappings are never descended. Idempotent: after
+// one run the value is `to`, so a second pass does nothing.
+func remapScalarDirectChild(m *yaml.Node, key, from, to string) bool {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			if v := m.Content[i+1]; v.Kind == yaml.ScalarNode && v.Value == from {
+				v.Value = to
+				return true
+			}
 		}
 	}
 	return false
@@ -715,6 +747,20 @@ func migrateHostOverlayDoc(ctx *MigrateContext, transform func(*yaml.Node) bool)
 		return false, nil
 	}
 	return rewriteDocFile(ctx.Dir, ctx.HostDeployPath, ctx.DryRun, transform, ctx.Out)
+}
+
+// migrateHostRuntimeConfigDoc applies a document transform to the per-host RUNTIME
+// config (ctx.HostRuntimePath, ~/.config/charly/config.yml — hostenv.RuntimeConfig),
+// which is a DIFFERENT type from the deploy overlay. A step selects this surface with
+// `host_config: "runtime_config"`; no step ever runs against both, because a transform
+// written for one shape can corrupt the other (reshapeDeployCPU would rename the
+// RuntimeVmConfig `cpus:` field). Gated on a non-empty path, so project-only/remote-cache
+// never touches it.
+func migrateHostRuntimeConfigDoc(ctx *MigrateContext, transform func(*yaml.Node) bool) (bool, error) {
+	if ctx.HostRuntimePath == "" {
+		return false, nil
+	}
+	return rewriteDocFile(ctx.Dir, ctx.HostRuntimePath, ctx.DryRun, transform, ctx.Out)
 }
 
 // rewriteDocFile reads path, decodes ONE YAML document, applies transform, and —

@@ -6,11 +6,12 @@ package migrate
 
 import "io"
 
-// MigrateContext is the migration runtime context: the project dir, the per-host overlay path,
-// the flags, and the progress writer.
+// MigrateContext is the migration runtime context: the project dir, the two per-host
+// files, the flags, and the progress writer.
 type MigrateContext struct {
-	Dir            string    // project directory (holds charly.yml)
-	HostDeployPath string    // per-host deploy overlay (~/.config/charly/charly.yml); empty in project-only mode
-	DryRun         bool      // print changes without touching the filesystem
-	Out            io.Writer // progress (os.Stderr for `charly migrate`, io.Discard for the remote-cache auto-migration)
+	Dir             string    // project directory (holds charly.yml)
+	HostDeployPath  string    // per-host deploy overlay (~/.config/charly/charly.yml, spec.DeployConfig); empty in project-only mode
+	HostRuntimePath string    // per-host runtime config (~/.config/charly/config.yml, hostenv.RuntimeConfig); empty in project-only mode
+	DryRun          bool      // print changes without touching the filesystem
+	Out             io.Writer // progress (os.Stderr for `charly migrate`, io.Discard for the remote-cache auto-migration)
 }
