@@ -890,7 +890,7 @@ var (
 
 // pipelineLaneArmErrors is the LOAD GATE for the emitted fan-out arm: it applies the target
 // grammar's own rules to the EMITTED document and returns every violation. The rules are the
-// ones sdk/workflowkit.ValidatePipeline enforces for a `lanes:` step — exactly one exec arm,
+// ones plugin-pipeline's workflowkit.ValidatePipeline enforces for a `lanes:` step — exactly one exec arm,
 // a non-empty collection, a REQUIRED positive `batch_size`, no `pause_ms`, `item_var` ≠
 // `index_var`, a non-empty `steps:` body of non-recursive sub-steps, loop companions only
 // beside a loop arm, and a collection that names an EARLIER top-level step — expressed as a
@@ -1057,7 +1057,7 @@ func TestPipelineLobsterLanesArmEmitted(t *testing.T) {
 // make it a gate rather than a pass-through:
 //
 //   - the EMITTED document satisfies the target grammar's fan-out rules (the frozen
-//     snapshot of what sdk/workflowkit.ValidatePipeline enforces);
+//     snapshot of what plugin-pipeline's workflowkit.ValidatePipeline enforces);
 //   - the PRE-CHANGE emission (the retired knob flattened into `config:`, no arm) FAILS the
 //     same gate — so a future reshape that stops emitting the arm fails here, not in a
 //     consumer;
