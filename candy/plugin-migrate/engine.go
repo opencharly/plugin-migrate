@@ -87,6 +87,7 @@ type migrationOp struct {
 	UnderKind  string `json:"under_kind"`
 	FromParent string `json:"from_parent"`
 	ToParent   string `json:"to_parent"`
+	Value      string `json:"value"`
 }
 
 // goHooks holds the structural-reshape escape hatches a declarative step names via
@@ -349,6 +350,8 @@ func applyOpToMapping(m *yaml.Node, op migrationOp) bool {
 		}
 	case "remap_scalar":
 		return remapScalarDirectChild(m, op.Key, op.From, op.To)
+	case "remove_list_value":
+		return removeListValueDirectChild(m, op.Key, op.Value)
 	case "move_key":
 		from := childMapping(m, op.FromParent)
 		to := childMapping(m, op.ToParent)
@@ -416,6 +419,53 @@ func remapScalarDirectChild(m *yaml.Node, key, from, to string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// removeListValueDirectChild removes every scalar `value` from the list under the DIRECT child
+// `key` of mapping m — the ONE implementation of the declarative `remove_list_value` arm. A list
+// the removal empties, or a key whose scalar value is exactly `value`, loses the key (its head
+// comment carried onto the next key, like delete_key), so the field falls back to its default.
+// Idempotent: after one run the value is gone, so a second pass changes nothing.
+func removeListValueDirectChild(m *yaml.Node, key, value string) bool {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != key {
+			continue
+		}
+		v := m.Content[i+1]
+		drop := false
+		switch v.Kind {
+		case yaml.ScalarNode:
+			drop = v.Value == value
+		case yaml.SequenceNode:
+			kept := v.Content[:0:0]
+			for _, item := range v.Content {
+				if item.Kind == yaml.ScalarNode && item.Value == value {
+					continue
+				}
+				kept = append(kept, item)
+			}
+			if len(kept) == len(v.Content) {
+				return false
+			}
+			if len(kept) > 0 {
+				v.Content = kept
+				return true
+			}
+			drop = true
+		}
+		if !drop {
+			return false
+		}
+		if i+2 < len(m.Content) && m.Content[i].HeadComment != "" && m.Content[i+2].HeadComment == "" {
+			m.Content[i+2].HeadComment = m.Content[i].HeadComment
+		}
+		m.Content = append(m.Content[:i], m.Content[i+2:]...)
+		return true
 	}
 	return false
 }

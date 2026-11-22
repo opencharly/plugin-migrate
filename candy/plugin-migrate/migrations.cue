@@ -255,4 +255,18 @@ migrations: [
 		host_config:  "runtime_config"
 		apply:        "remapEngineRunWord"
 	},
+	{
+		name: "aur-not-a-build-format"
+		// AUR IS A BUILDER, NOT A BUILD FORMAT (opencharly/sdk#608). spec dropped `aur` from
+		// _buildFormat: a box's `build:` lists OS package formats only, and the aur builder runs
+		// for any image whose tag chain selects a candy's `distro.<tag>.aur` declaration, routed
+		// by `builder: aur: <box>`. `build: [pac, aur]` was the opt-in whose absence silently
+		// dropped every declared aur package; it is now refused by the schema, so it is removed
+		// here. remove_list_value is scoped by VALUE, so a run step's `build: all` verb is never
+		// touched, and a list left empty (or a bare `build: aur`) loses the key, falling back to
+		// the default formats.
+		ops: [
+			{op: "remove_list_value", key: "build", value: "aur"},
+		]
+	},
 ]
