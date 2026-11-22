@@ -38,7 +38,7 @@ A step is:
 
 `name` labels the step for `--dry-run` output and progress. `touches_host: true` flags a step that mutates per-host state (`~/.config/charly`, quadlets, `.secrets`) — those steps are skipped by remote-cache auto-migration (see below). A step carries EITHER an `ops:` list OR a single `apply:` hook, never both; that "exactly one of the two" rule is enforced in Go, since CUE's field-presence comparison is too fragile for the gate.
 
-**The op vocabulary — each op is DATA, zero Go.** Four generic key transforms cover the common cutovers, all applied by ONE comment-preserving yaml.v3 interpreter (the op-walker in `candy/plugin-migrate/engine.go`):
+**The op vocabulary — each op is DATA, zero Go.** Five generic transforms cover the common cutovers, all applied by ONE comment-preserving yaml.v3 interpreter (the op-walker in `candy/plugin-migrate/engine.go`):
 
 | Op | Shape | Effect |
 |---|---|---|
@@ -46,10 +46,11 @@ A step is:
 | `delete_key` | `{key, scope?="any", under_kind?}` | drop a mapping key |
 | `remap_scalar` | `{key, from, to, under_kind?}` | rewrite a scalar VALUE `from` → `to` at `key` |
 | `move_key` | `{key, from_parent, to_parent, under_kind?}` | relocate a key between parent mappings |
+| `remove_list_value` | `{key, value, under_kind?}` | drop every occurrence of the scalar `value` from the list at `key`; a list the removal empties (or a bare `key: <value>`) loses the key, so the field falls back to its default |
 
-`scope` is `root` (top-level keys only) or `any` (every depth, the default; only `rename_key` / `delete_key` take it); `under_kind` further scopes an op to entities of a named kind (e.g. only `vm:` nodes). None of the four ops needs a line of new Go — the walker interprets the data.
+`scope` is `root` (top-level keys only) or `any` (every depth, the default; only `rename_key` / `delete_key` take it); `under_kind` further scopes an op to entities of a named kind (e.g. only `vm:` nodes). None of the five ops needs a line of new Go — the walker interprets the data.
 
-**The `apply:` hook — the deliberate, visible EXCEPTION.** A structural reshape the four ops can't express (splitting one node into siblings, folding a list into a map) sets `apply: "<hook>"` naming a Go function registered in the plugin's `goHooks` map. This is the ONLY path that runs bespoke Go for a migration, and it is intentionally conspicuous: a table entry carrying `apply:` is the signal that this step needed real code.
+**The `apply:` hook — the deliberate, visible EXCEPTION.** A structural reshape the five ops can't express (splitting one node into siblings, folding a list into a map) sets `apply: "<hook>"` naming a Go function registered in the plugin's `goHooks` map. This is the ONLY path that runs bespoke Go for a migration, and it is intentionally conspicuous: a table entry carrying `apply:` is the signal that this step needed real code.
 
 **CUE has NO transformation capability.** CUE is monotone unification — it can validate, default, require, and close, and nothing more; it CANNOT rewrite a config. So CUE owns exactly ONE thing here: the SHAPE of the declarative table (`#Migration` validates every entry at startup). Every actual transform is Go — the generic op-walker, or an `apply:` hook. Do not expect CUE to migrate anything.
 
@@ -68,6 +69,12 @@ A step is:
 | `unroll-group-deploy` | — | `unrollGroupDeploy` | — |
 | `deploy-cpu-spelling` | — | `reshapeDeployCPU` | `true` |
 | `rekey-legacy-vm-overlay` | — | `rekeyLegacyVMOverlay` | `true` |
+| `pipeline-lobster-syntax` | — | `reshapePipelineLobster` | — |
+| `retire-empty-group-node` | — | `retireEmptyGroupNode` | `true` |
+| `podman-jobs-to-stage-parallelism` | 2 × `rename_key` | — | — |
+| `engine-word-containerd` | `remap_scalar` | — | — |
+| `engine-run-word-containerd` | — | `remapEngineRunWord` | `true` |
+| `aur-not-a-build-format` | `remove_list_value` | — | — |
 
 `compact-node-form` is the schema-compaction cutover: it folds the former named data/step child-node grammar into the compact node form — collections (`env`/`volume`/`port`/`service`/…) inline in the kind value, steps as the ordered `plan:` list (a meaningful former step-node name becomes the step's `id:`), deploy data (`add_candy`/`install_opts`/`vm_state`/…) inline in the substrate node, and every authored step `plugin:`+`plugin_input:` pair rewritten to the `<word>: <input>` verb sugar. Member children (sub-entities under a deployable kind) stay named children. Remote layer caches auto-migrate on fetch (see "Remote-cache auto-migration").
 
@@ -96,7 +103,7 @@ There is no version gate to trip. Compatibility has ONE mechanism — the **CLOS
 
 **This section is maintenance the charly project performs on its OWN schema.** Nothing in it is a step a charly user runs — the user-facing surface is the single command `charly migrate`, unchanged. It is recorded here because this skill owns the migration table.
 
-The declarative engine's payoff: the common case needs **zero new Go**. Append ONE entry to **`candy/plugin-migrate/migrations.cue`**, expressing the transform as an `ops:` list (`rename_key` / `delete_key` / `remap_scalar` / `move_key`). Because the table is order-driven and version-free, there is no CalVer to bump and no cross-repo sequence — the entry IS the whole change, and it is idempotent by contract. A **structural reshape the four ops can't express** additionally registers ONE `goHooks` entry (a Go function named by the step's `apply:` field). Ship the entry in the same change that alters the schema, and update the repo's own versioned YAML.
+The declarative engine's payoff: the common case needs **zero new Go**. Append ONE entry to **`candy/plugin-migrate/migrations.cue`**, expressing the transform as an `ops:` list (`rename_key` / `delete_key` / `remap_scalar` / `move_key` / `remove_list_value`). Because the table is order-driven and version-free, there is no CalVer to bump and no cross-repo sequence — the entry IS the whole change, and it is idempotent by contract. A **structural reshape the five ops can't express** additionally registers ONE `goHooks` entry (a Go function named by the step's `apply:` field). Ship the entry in the same change that alters the schema, and update the repo's own versioned YAML.
 
 The operator command never changes — it stays `charly migrate`.
 
