@@ -116,7 +116,7 @@ check-migrate-local:
                   d=$(mktemp -d)
                   mkdir -p "$d/candy/pipe"
                   { printf 'discover:\n    - path: candy\n      recursive: true\n'; cat candy/plugin-migrate/testdata/lanes-matrix.yml; } > "$d/charly.yml"
-                  printf 'pipe:\n  candy:\n    description: the pipeline front-end, by released ref\n    candy:\n      - "@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.294.1135"\n    plan:\n      - check: the front-end resolves\n        context: [build]\n        command: "true"\n' > "$d/candy/pipe/charly.yml"
+                  printf 'pipe:\n  candy:\n    description: the pipeline front-end, by released ref\n    candy:\n      - "@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.324.0037"\n    plan:\n      - check: the front-end resolves\n        context: [build]\n        command: "true"\n' > "$d/candy/pipe/charly.yml"
                   ${CHARLY_BIN} migrate --dir "$d" --project-only >/dev/null 2>&1
                   grep -qF 'lanes: ${prs}' "$d/charly.yml" || { echo "the fan-out arm was not emitted" >&2; exit 1; }
                   grep -qF 'batch_size: 16' "$d/charly.yml" || { echo "the pool width was not emitted" >&2; exit 1; }
@@ -141,7 +141,7 @@ check-migrate-local:
                   d=$(mktemp -d)
                   mkdir -p "$d/candy/pipe"
                   { printf 'discover:\n    - path: candy\n      recursive: true\n'; cat candy/plugin-migrate/testdata/lanes-matrix.yml; } > "$d/charly.yml"
-                  printf 'pipe:\n  candy:\n    description: the pipeline front-end, by released ref\n    candy:\n      - "@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.294.1135"\n    plan:\n      - check: the front-end resolves\n        context: [build]\n        command: "true"\n' > "$d/candy/pipe/charly.yml"
+                  printf 'pipe:\n  candy:\n    description: the pipeline front-end, by released ref\n    candy:\n      - "@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.324.0037"\n    plan:\n      - check: the front-end resolves\n        context: [build]\n        command: "true"\n' > "$d/candy/pipe/charly.yml"
                   rc=0
                   ${CHARLY_BIN} box validate --dir "$d" > "$d/out" 2>&1 || rc=$?
                   # Every BAD path exits NON-ZERO here. An earlier version folded its own
