@@ -107,6 +107,7 @@ var goHooks = map[string]func(*yaml.Node) bool{
 	"reshapePipelineLobster":  reshapePipelineLobster,  // legacy kind:pipeline stages: grammar → lobster steps:/verb-sugar grammar (reshape_pipeline_lobster.go)
 	"retireEmptyGroupNode":    retireEmptyGroupNode,    // barren `group:` node with nothing to promote → retired (reshape_retire_empty_group.go)
 	"remapEngineRunWord":      remapEngineRunWord,      // host `engine: {run: nerdctl}` → `{run: containerd}` direct-child remap (reshape_engine_word.go)
+	"remapGitSubmodulesMode":  remapGitSubmodulesMode,  // `git-submodules: {mode: bump}` → `{mode: ff}` direct-child remap (reshape_git_submodules_mode.go)
 }
 
 // migrationTable is the validated, declaration-ordered step list, loaded once at

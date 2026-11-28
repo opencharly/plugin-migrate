@@ -269,4 +269,15 @@ migrations: [
 			{op: "remove_list_value", key: "build", value: "aur"},
 		]
 	},
+	{
+		name: "git-submodules-mode-ff"
+		// THE PIN ADVANCE'S MODE `bump` → `ff` (opencharly/opencharly#1347,
+		// opencharly/plugin-task#69). The verb now only fast-forwards and the retired word
+		// is refused by its schema. The rewrite is PATH-SCOPED to a `mode:` that is a
+		// DIRECT child of a `git-submodules:` mapping: a declarative remap_scalar cannot
+		// require that parent, and a document-wide `mode: bump` remap would rewrite an
+		// unrelated scalar that happens to spell the retired word. Tasks are project-level,
+		// so there is no touches_host half.
+		apply: "remapGitSubmodulesMode"
+	},
 ]
