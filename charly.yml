@@ -27,7 +27,7 @@ check-migrate-local:
         disposable: true
         lifecycle: dev
         description: >-
-            Sole proof of the externalized config-schema MIGRATION ENGINE (candy/plugin-migrate, command:migrate — M15). A disposable kind:local deploy on host: local runs `charly migrate` host-side against mktemp fixtures: the host charly resolves command:migrate from the compiled-in registry and Invoke(OpRun) runs the engine in-proc, proving the engine relocation (the universal strip-version-stamp step, idempotency, --dry-run plumbing) end-to-end on a fresh rebuild; the declarative transform ops are covered by the plugin's engine_test.go units, and the aur arm (a box `build: [pac, aur]`, the config the schema now refuses because AUR is a builder — opencharly/sdk#608) is exercised here too, including that it leaves a run step's `build: all` verb and a candy's `distro.<tag>.aur` declaration alone. The last three steps prove the pipeline-lobster leg on the REAL eval-omarchy pipeline entities (testdata/eval-pr-plan.yml): stages→steps, kind:command→run:, skip_when→inverted when:, @stage.out→$stage.json.out, the added description:, the config:/args: consolidation — with @github candy refs and shell vars preserved byte-identical and a second run a no-op.
+            Sole proof of the externalized config-schema MIGRATION ENGINE (candy/plugin-migrate, command:migrate — M15). A disposable kind:local deploy on host: local runs `charly migrate` host-side against mktemp fixtures: the host charly resolves command:migrate from the compiled-in registry and Invoke(OpRun) runs the engine in-proc, proving the engine relocation (the universal strip-version-stamp step, idempotency, --dry-run plumbing) end-to-end on a fresh rebuild; the declarative transform ops are covered by the plugin's engine_test.go units, and the aur arm (a box `build: [pac, aur]`, the config the schema now refuses because AUR is a builder — opencharly/sdk#608) is exercised here too, including that it leaves a run step's `build: all` verb and a candy's `distro.<tag>.aur` declaration alone. The last three steps prove the pipeline-lobster leg on the REAL eval-omarchy pipeline entities (testdata/eval-pr-plan.yml): stages→steps, kind:command→run:, skip_when→inverted when:, @stage.out→$stage.json.out, the added description:, the config:/args: consolidation — with @github candy refs and shell vars preserved byte-identical and a second run a no-op. The pin-advance mode rename (`git-submodules: {mode: bump}` → `{mode: ff}`, opencharly/opencharly#1347) is proven PATH-SCOPED here too: the retired word is rewritten only as the direct child of a `git-submodules:` mapping, while an unrelated `tool: {mode: bump}` step keeps its value, and a second run is a no-op.
         plan:
             - check: charly migrate strips a retired top-level version stamp from a project AND its candy manifest (exit 0, "applied strip-version-stamp")
               id: migrate-strips-version-stamp
@@ -117,6 +117,34 @@ check-migrate-local:
                 - runtime
               command:
                 command: 'd=$(mktemp -d); printf "discover:\n    - path: candy\n      recursive: true\nbox:\n    aur-test:\n        base: arch\n        build: [pac, aur]\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only >/dev/null 2>&1; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
+                in_container: false
+            - check: 'charly migrate rewrites the retired `git-submodules: {mode: bump}` advance mode to `{mode: ff}` (opencharly/opencharly#1347, opencharly/plugin-task#69) while an UNRELATED `tool: {mode: bump}` step keeps its `bump` — the rewrite is PATH-SCOPED to a `mode:` that is a direct child of a `git-submodules:` mapping, which a declarative document-wide `remap_scalar` cannot express and would corrupt'
+              id: migrate-git-submodules-mode-ff
+              exit_status: 0
+              context:
+                - runtime
+              command:
+                command: |-
+                  set -eu
+                  d=$(mktemp -d)
+                  printf 'discover:\n    - path: candy\n      recursive: true\npins:\n    task:\n        description: advance every pin, plus an unrelated tool mode\n        plan:\n            - run: advance every pin\n              git-submodules:\n                  mode: bump\n                  pinned_from: charly\n            - run: an unrelated tool mode that happens to spell the retired word\n              tool:\n                  mode: bump\n' > "$d/charly.yml"
+                  ${CHARLY_BIN} migrate --dir "$d" --project-only > "$d/out" 2>&1 || { cat "$d/out" >&2; exit 1; }
+                  grep -qF 'applied git-submodules-mode-ff' "$d/out" || { echo "the git-submodules mode step did not fire:" >&2; cat "$d/out" >&2; exit 1; }
+                  test "$(grep -cE '^[[:space:]]+mode: ff$' "$d/charly.yml")" = "1" || { echo "the git-submodules mode is not ff" >&2; cat "$d/charly.yml" >&2; exit 1; }
+                  test "$(grep -cE '^[[:space:]]+mode: bump$' "$d/charly.yml")" = "1" || { echo "the unrelated tool mode: bump was rewritten or lost" >&2; cat "$d/charly.yml" >&2; exit 1; }
+                  grep -qE '^[[:space:]]+tool:$' "$d/charly.yml" || { echo "the unrelated tool step was lost" >&2; cat "$d/charly.yml" >&2; exit 1; }
+                  rm -rf "$d"
+                  exit 0
+                in_container: false
+            - check: a SECOND charly migrate on the already-rewritten git-submodules mode is a no-op (exit 0, "nothing to migrate") — the git-submodules step is idempotent
+              id: migrate-git-submodules-mode-idempotent
+              exit_status: 0
+              stderr:
+                - contains: 'nothing to migrate'
+              context:
+                - runtime
+              command:
+                command: 'd=$(mktemp -d); printf "discover:\n    - path: candy\n      recursive: true\ngit-submodules:\n    mode: bump\n" > "$d/charly.yml"; ${CHARLY_BIN} migrate --dir "$d" --project-only >/dev/null 2>&1; ${CHARLY_BIN} migrate --dir "$d" --project-only; rc=$?; rm -rf "$d"; exit $rc'
                 in_container: false
             - check: charly migrate rewrites the legacy kind-pipeline grammar into lobster steps syntax (stages→steps, kind-command→run, skip_when→inverted when, @stage.out→$stage.json.out), adds the required description, consolidates config, labels every lifted verb step with the `run:` intent keyword it emits (a bare `<verb>:` as a step key is the load failure this once shipped) plus the stage id as its label, declares a #TaskParamSpec-valid args pr entry, duplicates into each lifted verb body the entity-level knobs that verb reads (skills/llm/repo, media, report) so the lifted verb is self-contained on a plan with no pipeline config, carries a retired `concurrency: {lanes: N}` onto the pooled fan-out arm (one `lanes: ${prs}` step with `batch_size: N`, `item_var: pr`, the whole migrated step list as its body, and every retired `$pr` read rebound to `$pr.stdout`) for a stage graph the target grammar can express, keeps that knob in `config:` for one it cannot (the matrix wraps, eval-pr-plan does not — its stages chain, opencharly/sdk#441), and leaves @github candy refs + shell vars byte-identical
               id: migrate-pipeline-v1
